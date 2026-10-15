@@ -1,0 +1,391 @@
+#include "lanaudio/stream.hpp"
+
+#include "lanaudio/protocol/guard.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+
+namespace lanaudio {
+namespace {
+
+std::uint32_t level_milli(std::span<const float> samples) noexcept {
+  float peak = 0.0F;
+  for (const float sample : samples) {
+    peak = std::max(peak, std::abs(sample));
+  }
+  return static_cast<std::uint32_t>(
+      std::clamp(peak, 0.0F, 1.0F) * 1'000.0F);
+}
+
+std::uint64_t monotonic_micros() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+bool validate_session(const StreamConfig& config, std::string& error) {
+  if (!config.format.valid()) {
+    error = "invalid audio format";
+    return false;
+  }
+  if (config.format.channels != 2) {
+    error = "the media path supports stereo network audio only";
+    return false;
+  }
+  if (config.require_protection && config.protector == nullptr) {
+    error =
+        "refusing to start unprotected media: no SRTP context was supplied by "
+        "the authenticated control session";
+    return false;
+  }
+  if (config.require_protection &&
+      (config.ssrc == 0 || config.session_id == 0)) {
+    error =
+        "refusing to start media without a negotiated session identifier and "
+        "SSRC";
+    return false;
+  }
+  if (config.payload_type < 96 || config.payload_type > 127) {
+    error = "negotiated RTP payload type is outside the dynamic range";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+NetworkSender::NetworkSender(StreamConfig config) : config_(std::move(config)) {}
+NetworkSender::~NetworkSender() { stop(); }
+
+bool NetworkSender::start(std::string& error) {
+  if (!validate_session(config_, error)) return false;
+  if (!socket_.set_destination(config_.host, config_.port, error)) return false;
+  if (running_.exchange(true)) return true;
+  metrics_.session_active.store(true, std::memory_order_release);
+  thread_ = std::thread([this] { run(); });
+  return true;
+}
+
+void NetworkSender::stop() noexcept {
+  running_.store(false, std::memory_order_release);
+  if (thread_.joinable()) thread_.join();
+  metrics_.session_active.store(false, std::memory_order_release);
+}
+
+void NetworkSender::push_audio(std::span<const float> interleaved) noexcept {
+  metrics_.input_level_milli.store(level_milli(interleaved),
+                                   std::memory_order_relaxed);
+  metrics_.media_callbacks.fetch_add(1, std::memory_order_relaxed);
+  while (!interleaved.empty()) {
+    AudioBlock block;
+    block.count = static_cast<std::uint16_t>(
+        std::min(interleaved.size(), block.samples.size()));
+    std::copy_n(interleaved.begin(), block.count, block.samples.begin());
+    if (!queue_.try_push(block)) {
+      metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    interleaved = interleaved.subspan(block.count);
+  }
+}
+
+void NetworkSender::run() noexcept {
+  Packetizer packetizer(config_.format, config_.ssrc);
+  AudioBlock block;
+  std::array<std::byte, kMaxProtectedPacketBytes> wire{};
+  while (running_.load(std::memory_order_acquire)) {
+    if (!queue_.try_pop(block)) {
+      std::this_thread::sleep_for(std::chrono::microseconds(250));
+      continue;
+    }
+    std::size_t offset = 0;
+    while (offset < block.count) {
+      RtpPacket packet;
+      bool completed = false;
+      offset += packetizer.push(
+          std::span<const float>(block.samples.data() + offset,
+                                 block.count - offset),
+          packet, completed);
+      if (!completed) continue;
+      packet.header.payload_type = config_.payload_type;
+      auto size = serialize_rtp(packet, wire);
+      if (size == 0) {
+        metrics_.malformed_packets.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (config_.protector != nullptr) {
+        size = config_.protector->protect(wire, size);
+        if (size == 0) {
+          // Fail closed: never fall back to emitting the plaintext packet.
+          metrics_.decrypt_failures.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+      std::string error;
+      if (socket_.send(std::span<const std::byte>(wire.data(), size), error)) {
+        metrics_.packets_sent.fetch_add(1, std::memory_order_relaxed);
+        metrics_.last_media_micros.store(monotonic_micros(),
+                                         std::memory_order_relaxed);
+      }
+    }
+  }
+}
+
+NetworkReceiver::NetworkReceiver(StreamConfig config)
+    : config_(std::move(config)),
+      jitter_(config_.jitter_packets),
+      drift_(DriftController::Config{
+          static_cast<double>(config_.jitter_packets), 100.0, 0.01, 0.02,
+          250.0}) {}
+NetworkReceiver::~NetworkReceiver() { stop(); }
+
+bool NetworkReceiver::start(std::string& error) {
+  if (!validate_session(config_, error)) return false;
+  if (!socket_.bind(config_.port, error)) return false;
+  if (running_.exchange(true)) return true;
+  peer_ = config_.expected_peer;
+  session_valid_.store(true, std::memory_order_release);
+  metrics_.session_active.store(true, std::memory_order_release);
+  thread_ = std::thread([this] { run(); });
+  return true;
+}
+
+void NetworkReceiver::stop() noexcept {
+  running_.store(false, std::memory_order_release);
+  session_valid_.store(false, std::memory_order_release);
+  if (thread_.joinable()) thread_.join();
+  metrics_.session_active.store(false, std::memory_order_release);
+}
+
+void NetworkReceiver::expire_session() noexcept {
+  // Stop accepting media immediately. render_audio observes this flag and
+  // produces silence even if the device callback is still running.
+  session_valid_.store(false, std::memory_order_release);
+  metrics_.session_active.store(false, std::memory_order_release);
+}
+
+void NetworkReceiver::drain_queue() noexcept {
+  AudioBlock discarded;
+  while (queue_.try_pop(discarded)) {
+  }
+  current_ = AudioBlock{};
+  current_offset_ = 0;
+  resampler_primed_ = false;
+  resample_phase_ = 0.0;
+}
+
+void NetworkReceiver::run() noexcept {
+  std::array<std::byte, kMaxProtectedPacketBytes> wire{};
+  std::array<float, 2> conceal_from{};
+  bool have_audio = false;
+  protocol::AbuseGuard guard;
+
+  while (running_.load(std::memory_order_acquire)) {
+    std::string error;
+    Endpoint source;
+    const auto count = socket_.receive_from(
+        wire, std::chrono::milliseconds(20), source, error);
+    if (count <= 0) continue;
+    if (!session_valid_.load(std::memory_order_acquire)) continue;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!guard.accept(now)) {
+      metrics_.rate_limited_packets.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+
+    // Media is bound to the authenticated peer. The first accepted datagram
+    // pins the address when the control channel did not supply one.
+    if (config_.restrict_to_peer) {
+      if (peer_.valid()) {
+        if (!peer_.same_address(source)) {
+          metrics_.foreign_source_rejections.fetch_add(
+              1, std::memory_order_relaxed);
+          if (guard.record_invalid(now)) {
+            metrics_.rate_limited_packets.fetch_add(1,
+                                                    std::memory_order_relaxed);
+          }
+          continue;
+        }
+      }
+    }
+
+    auto size = static_cast<std::size_t>(count);
+    if (config_.protector != nullptr) {
+      const auto plain = config_.protector->unprotect(wire, size);
+      if (plain == 0) {
+        if (config_.protector->last_failure_was_replay()) {
+          metrics_.replay_rejections.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          metrics_.decrypt_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (guard.record_invalid(now)) {
+          metrics_.rate_limited_packets.fetch_add(1, std::memory_order_relaxed);
+        }
+        continue;
+      }
+      size = plain;
+    }
+
+    RtpPacket incoming;
+    if (parse_rtp(std::span<const std::byte>(wire.data(), size),
+                  config_.payload_type, incoming) != ParseError::none ||
+        incoming.header.ssrc != config_.ssrc ||
+        incoming.payload_size != config_.format.payload_bytes()) {
+      metrics_.malformed_packets.fetch_add(1, std::memory_order_relaxed);
+      if (guard.record_invalid(now)) {
+        metrics_.rate_limited_packets.fetch_add(1, std::memory_order_relaxed);
+      }
+      continue;
+    }
+
+    guard.record_valid();
+    if (config_.restrict_to_peer && !peer_.valid()) peer_ = source;
+    metrics_.packets_received.fetch_add(1, std::memory_order_relaxed);
+    metrics_.last_media_micros.store(monotonic_micros(),
+                                     std::memory_order_relaxed);
+
+    const auto result = jitter_.insert(incoming);
+    if (result == JitterBuffer::InsertResult::too_late) {
+      metrics_.late_packets.fetch_add(1, std::memory_order_relaxed);
+    } else if (result == JitterBuffer::InsertResult::overrun) {
+      metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
+    }
+    metrics_.stream_resyncs.store(jitter_.resyncs(), std::memory_order_relaxed);
+    metrics_.jitter_buffer_packets.store(
+        static_cast<std::uint32_t>(jitter_.size()), std::memory_order_relaxed);
+
+    RtpPacket ready;
+    for (;;) {
+      const auto pop_result = jitter_.pop(ready);
+      if (pop_result == JitterBuffer::PopResult::waiting) break;
+      if (pop_result == JitterBuffer::PopResult::missing) {
+        metrics_.lost_packets.fetch_add(1, std::memory_order_relaxed);
+        AudioBlock concealed;
+        concealed.count =
+            static_cast<std::uint16_t>(config_.format.samples_per_packet());
+        concealed.samples.fill(0.0F);
+        if (have_audio) {
+          const auto fade_frames = std::min<std::size_t>(
+              32, config_.format.frames_per_packet);
+          for (std::size_t frame = 0; frame < fade_frames; ++frame) {
+            const float gain =
+                static_cast<float>(fade_frames - frame) / fade_frames;
+            concealed.samples[frame * 2] = conceal_from[0] * gain;
+            concealed.samples[frame * 2 + 1] = conceal_from[1] * gain;
+          }
+        }
+        if (!queue_.try_push(concealed)) {
+          // The playback queue is full; stop draining so the network thread
+          // returns to reading sockets instead of spinning on a full queue.
+          metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
+          break;
+        }
+        continue;
+      }
+      AudioBlock block;
+      block.count = static_cast<std::uint16_t>(ready.payload_size / 2);
+      l16be_to_float(
+          std::span<const std::byte>(ready.payload.data(), ready.payload_size),
+          std::span<float>(block.samples.data(), block.count));
+      if (block.count >= 2) {
+        conceal_from[0] = block.samples[block.count - 2];
+        conceal_from[1] = block.samples[block.count - 1];
+        have_audio = true;
+      }
+      if (!queue_.try_push(block)) {
+        metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
+        break;
+      }
+    }
+  }
+}
+
+bool NetworkReceiver::next_source_frame(
+    std::array<float, 2>& frame) noexcept {
+  if (config_.format.channels != 2) return false;
+  if (current_offset_ + 2 > current_.count) {
+    if (!queue_.try_pop(current_)) return false;
+    current_offset_ = 0;
+  }
+  frame[0] = current_.samples[current_offset_];
+  frame[1] = current_.samples[current_offset_ + 1];
+  current_offset_ += 2;
+  return true;
+}
+
+void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
+  metrics_.media_callbacks.fetch_add(1, std::memory_order_relaxed);
+  auto finalize_output = [this, interleaved]() noexcept {
+    metrics_.output_level_milli.store(level_milli(interleaved),
+                                      std::memory_order_relaxed);
+    if (muted_.load(std::memory_order_relaxed)) {
+      std::fill(interleaved.begin(), interleaved.end(), 0.0F);
+    }
+  };
+
+  // Fail closed: an expired or unauthenticated session plays silence.
+  if (!session_valid_.load(std::memory_order_acquire)) {
+    std::fill(interleaved.begin(), interleaved.end(), 0.0F);
+    if (current_.count != 0 || current_offset_ != 0) drain_queue();
+    metrics_.output_level_milli.store(0, std::memory_order_relaxed);
+    return;
+  }
+  if (config_.format.channels != 2) {
+    std::fill(interleaved.begin(), interleaved.end(), 0.0F);
+    metrics_.underruns.fetch_add(1, std::memory_order_relaxed);
+    finalize_output();
+    return;
+  }
+  const double ratio = drift_.update(static_cast<double>(queue_.size_approx()));
+  metrics_.drift_ppm.store(
+      static_cast<std::int32_t>(drift_.correction_ppm()),
+      std::memory_order_relaxed);
+
+  if (!resampler_primed_) {
+    if (!next_source_frame(frame_a_) || !next_source_frame(frame_b_)) {
+      std::fill(interleaved.begin(), interleaved.end(), 0.0F);
+      metrics_.underruns.fetch_add(1, std::memory_order_relaxed);
+      finalize_output();
+      return;
+    }
+    resampler_primed_ = true;
+  }
+
+  std::size_t output_offset = 0;
+  while (output_offset + 1 < interleaved.size()) {
+    const auto phase = static_cast<float>(resample_phase_);
+    interleaved[output_offset] =
+        frame_a_[0] + (frame_b_[0] - frame_a_[0]) * phase;
+    interleaved[output_offset + 1] =
+        frame_a_[1] + (frame_b_[1] - frame_a_[1]) * phase;
+    output_offset += 2;
+    resample_phase_ += ratio;
+    while (resample_phase_ >= 1.0) {
+      frame_a_ = frame_b_;
+      if (!next_source_frame(frame_b_)) {
+        const auto frames_left = (interleaved.size() - output_offset) / 2;
+        for (std::size_t i = 0; i < frames_left; ++i) {
+          const float gain =
+              i < 16 ? static_cast<float>(16 - i) / 16.0F : 0.0F;
+          interleaved[output_offset + i * 2] = frame_a_[0] * gain;
+          interleaved[output_offset + i * 2 + 1] = frame_a_[1] * gain;
+        }
+        if ((interleaved.size() & 1U) != 0) interleaved.back() = 0.0F;
+        resampler_primed_ = false;
+        resample_phase_ = 0.0;
+        metrics_.underruns.fetch_add(1, std::memory_order_relaxed);
+        finalize_output();
+        return;
+      }
+      resample_phase_ -= 1.0;
+    }
+  }
+  if (output_offset < interleaved.size()) interleaved[output_offset] = 0.0F;
+  finalize_output();
+}
+
+}  // namespace lanaudio

@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  LANAUDIO_VERSION: "0.1.0"
+  # Qt 6.8.3 is the last public 6.8 binary release and supports Intel macOS 13.
+  LANAUDIO_QT_VERSION: "6.8.3"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan pinned dependencies
+        run: python3 tools/security/scan_lock.py dependencies.lock.json
+      - name: Generate SBOM
+        run: python3 tools/security/generate_sbom.py dependencies.lock.json sbom.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanaudio-sbom-${{ matrix.os }}
+          path: sbom.json
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DLANAUDIO_BUILD_GUI=OFF
+          -DLANAUDIO_ENABLE_RTAUDIO=OFF
+          -DLANAUDIO_FETCH_DEPS=OFF
+          -DLANAUDIO_ENABLE_SECURITY=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Reject plaintext distribution combination
+        run: |
+          if cmake -S . -B build-plaintext-dist -G Ninja \
+            -DLANAUDIO_ALLOW_PLAINTEXT=ON \
+            -DLANAUDIO_MACOS_DISTRIBUTION=ON \
+            -DLANAUDIO_BUILD_GUI=OFF \
+            -DLANAUDIO_ENABLE_RTAUDIO=OFF \
+            -DLANAUDIO_FETCH_DEPS=OFF; then
+            echo "plaintext distribution configuration must fail" >&2
+            exit 1
+          fi
+
+  macos-distribution:
+    name: macOS ${{ matrix.arch }} distribution
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+          - arch: x86_64
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "${{ env.LANAUDIO_QT_VERSION }}"
+          host: mac
+          target: desktop
+          arch: clang_64
+          cache: true
+
+      - name: Confirm native runner
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          cmake --version
+          qmake -query QT_VERSION
+
+      - name: Install OpenSSL 3
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Scan pinned dependencies
+        run: python3 tools/security/scan_lock.py dependencies.lock.json
+
+      - name: Configure complete application
+        run: >-
+          cmake -S . -B build-macos -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          -DLANAUDIO_MACOS_DISTRIBUTION=ON
+          -DLANAUDIO_BUILD_GUI=ON
+          -DLANAUDIO_ENABLE_RTAUDIO=ON
+          -DLANAUDIO_FETCH_DEPS=ON
+          -DLANAUDIO_ENABLE_SECURITY=ON
+          -DLANAUDIO_ALLOW_PLAINTEXT=OFF
+          -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_ROOT_DIR }}
+
+      - name: Build and test
+        run: |
+          cmake --build build-macos --parallel
+          ctest --test-dir build-macos --output-on-failure
+
+      - name: Build architecture-specific DMG
+        run: cpack --config build-macos/CPackConfig.cmake -G DragNDrop
+
+      - name: Verify package architecture and runtime closure
+        run: |
+          dmg="LanAudio-${LANAUDIO_VERSION}-macOS-${{ matrix.arch }}.dmg"
+          file "$dmg"
+          tools/macos/verify_dmg.sh "$dmg" "${{ matrix.arch }}"
+          python3 tools/security/generate_sbom.py dependencies.lock.json \
+            "LanAudio-${LANAUDIO_VERSION}-macOS-${{ matrix.arch }}.sbom.json"
+
+      - name: Sign and notarize when Apple credentials are present
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: |
+          chmod +x packaging/macos/notarize.sh
+          packaging/macos/notarize.sh \
+            "LanAudio-${LANAUDIO_VERSION}-macOS-${{ matrix.arch }}.dmg" \
+            "${{ matrix.arch }}"
+
+      - name: Upload end-user DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanAudio-${{ env.LANAUDIO_VERSION }}-macOS-${{ matrix.arch }}
+          path: LanAudio-${{ env.LANAUDIO_VERSION }}-macOS-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DLANAUDIO_BUILD_GUI=OFF
+          -DLANAUDIO_ENABLE_RTAUDIO=OFF
+          -DLANAUDIO_FETCH_DEPS=ON
+          -DLANAUDIO_ENABLE_SECURITY=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+      - name: Build and test
+        run: cmake --build build --parallel && ctest --test-dir build --output-on-failure
+
+  fuzzers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang and Ninja
+        run: sudo apt-get update && sudo apt-get install -y clang ninja-build
+      - name: Configure fuzzers
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B build-fuzz -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DLANAUDIO_BUILD_GUI=OFF
+          -DLANAUDIO_ENABLE_RTAUDIO=OFF
+          -DLANAUDIO_ENABLE_SECURITY=OFF
+          -DLANAUDIO_FETCH_DEPS=OFF
+          -DLANAUDIO_BUILD_FUZZERS=ON
+      - name: Build and smoke-run parsers
+        run: |
+          cmake --build build-fuzz --parallel --target lanaudio_fuzz_control lanaudio_fuzz_rtp
+          mkdir -p /tmp/fuzz-corpus
+          echo -n 'abc' > /tmp/fuzz-corpus/seed
+          ./build-fuzz/lanaudio_fuzz_control /tmp/fuzz-corpus -runs=256
+          ./build-fuzz/lanaudio_fuzz_rtp /tmp/fuzz-corpus -runs=256

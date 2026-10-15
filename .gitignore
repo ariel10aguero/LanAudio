@@ -1,0 +1,8 @@
+/build*/
+/_CPack_Packages/
+/.cache/
+*.user
+*.DS_Store
+compile_commands.json
+LanAudio-*.tar.gz
+LanAudio-*.dmg

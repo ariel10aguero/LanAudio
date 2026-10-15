@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run a universal Qt host tool through Rosetta when an Apple Silicon builder
+# creates the Intel package. This avoids selecting the tool's arm64 slice.
+exec /usr/bin/arch -x86_64 "@LANAUDIO_X86_HOST_TOOL@" "$@"

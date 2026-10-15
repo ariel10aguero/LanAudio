@@ -1,0 +1,20 @@
+set(LANAUDIO_INSTALLED_APP
+  "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/LanAudio.app")
+
+if(NOT EXISTS "${LANAUDIO_INSTALLED_APP}")
+  message(FATAL_ERROR
+    "Cannot ad-hoc sign missing application: ${LANAUDIO_INSTALLED_APP}")
+endif()
+
+execute_process(
+  COMMAND /usr/bin/codesign --force --deep --sign - --timestamp=none
+          "${LANAUDIO_INSTALLED_APP}"
+  RESULT_VARIABLE LANAUDIO_CODESIGN_RESULT
+  OUTPUT_VARIABLE LANAUDIO_CODESIGN_OUTPUT
+  ERROR_VARIABLE LANAUDIO_CODESIGN_ERROR)
+
+if(NOT LANAUDIO_CODESIGN_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Ad-hoc signing failed: ${LANAUDIO_CODESIGN_OUTPUT}"
+    "${LANAUDIO_CODESIGN_ERROR}")
+endif()

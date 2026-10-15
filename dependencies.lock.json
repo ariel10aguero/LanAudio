@@ -1,0 +1,63 @@
+{
+  "schema": "lanaudio-dependency-lock/1",
+  "updated": "2026-10-15",
+  "note": "Security-relevant dependencies are fetched from immutable release archives and verified by SHA-256 before configuration. Mutable git tags must not be used for these entries.",
+  "fetched": [
+    {
+      "name": "libsrtp",
+      "version": "2.6.0",
+      "purpose": "SRTP AEAD media protection, replay protection",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/cisco/libsrtp/archive/refs/tags/v2.6.0.tar.gz",
+      "sha256": "bf641aa654861be10570bfc137d1441283822418e9757dc71ebb69a6cf84ea6b",
+      "cmake_target": "srtp2",
+      "build_options": {
+        "ENABLE_OPENSSL": "ON",
+        "LIBSRTP_TEST_APPS": "OFF",
+        "BUILD_SHARED_LIBS": "OFF"
+      }
+    },
+    {
+      "name": "rtaudio",
+      "version": "6.0.1",
+      "purpose": "Physical audio device I/O",
+      "license": "MIT-like permissive",
+      "url": "https://github.com/thestk/rtaudio/archive/refs/tags/6.0.1.tar.gz",
+      "sha256": "7206c8b6cee43b474f43d64988fefaadfdcfc4264ed38d8de5f5d0e6ddb0a123",
+      "cmake_target": "RtAudio::rtaudio"
+    }
+  ],
+  "system": [
+    {
+      "name": "openssl",
+      "purpose": "TLS 1.3 control channel, Ed25519 identity, CSPRNG, SRTP crypto backend",
+      "license": "Apache-2.0",
+      "minimum_version": "3.0.0",
+      "release_ci_version": "3.5",
+      "provisioning": {
+        "macos": "brew install openssl@3.5 (OPENSSL_ROOT_DIR set by CI)",
+        "ubuntu": "libssl-dev from the pinned runner image"
+      },
+      "note": "Patch level follows the platform security updates intentionally; the minimum version is enforced during configuration."
+    },
+    {
+      "name": "qt",
+      "version": "6.8.3",
+      "purpose": "Desktop GUI",
+      "license": "LGPLv3 / commercial",
+      "note": "Pinned in .github/workflows/ci.yml as LANAUDIO_QT_VERSION; official macOS packages are universal and support macOS 13."
+    }
+  ],
+  "platform_frameworks": [
+    {
+      "name": "Security.framework",
+      "platform": "macOS",
+      "purpose": "Keychain storage of the device identity private key"
+    },
+    {
+      "name": "dns_sd (Bonjour)",
+      "platform": "macOS",
+      "purpose": "Local device discovery"
+    }
+  ]
+}

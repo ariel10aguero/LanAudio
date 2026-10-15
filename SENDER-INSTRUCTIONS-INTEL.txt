@@ -1,0 +1,72 @@
+LanAudio Sender Instructions for an Intel Mac
+==============================================
+
+Requirements
+------------
+- Intel Mac running macOS 13.0 or newer.
+- The sender and receiver must be connected to the same reachable Wi-Fi or
+  Ethernet network.
+- The receiver should already be running in Receive mode.
+
+Install LanAudio
+----------------
+1. Download: LanAudio-0.1.0-macOS-x86_64.dmg
+2. Open the DMG file.
+3. Drag LanAudio.app to the Applications folder.
+4. Open LanAudio. If macOS blocks the unsigned development app, Control-click
+   it, choose Open, and confirm.
+
+Start sending with the app
+---------------------------
+1. Open LanAudio from Applications.
+2. Select Send mode.
+3. Connect the USB interface before launch, or click Refresh.
+4. Select the microphone/audio interface (for example Scarlett 2i4) and its
+   input pair.
+5. Click Scan LAN and select the receiver, or type the receiver's IP address.
+6. Leave control port 5005 selected.
+7. Click Send audio. When both Macs show the same six-digit code, click
+   Codes match on each device.
+8. Allow microphone access when macOS asks.
+9. Audio starts only after the status shows a secure session / streaming.
+
+Start sending from Terminal
+----------------------------
+List audio devices first:
+
+  /Applications/LanAudio.app/Contents/MacOS/lanaudio-cli devices
+
+Discover receivers:
+
+  /Applications/LanAudio.app/Contents/MacOS/lanaudio-cli discover
+
+Start the sender, replacing RECEIVER_IP with the receiver's actual LAN IP:
+
+  /Applications/LanAudio.app/Contents/MacOS/lanaudio-cli send \
+    --host RECEIVER_IP --control-port 5005 --input 0 \
+    --input-channel 1 --buffer-frames 128
+
+When prompted, type yes only if the six-digit code matches the receiver.
+Device ID 0 selects the default input device. To use another device, replace
+0 after --input with the ID shown by the devices command. --input-channel is
+one-based; use 1 for interface inputs 1-2.
+
+Stop the sender
+---------------
+Press Ctrl-C in the Terminal running the sender.
+
+Troubleshooting
+---------------
+- Verify that the receiver is listening on control port 5005 and media port
+  5004.
+- Verify that the receiver IP address is current and belongs to the same LAN.
+- Allow inbound TCP 5005 and UDP 5004 through the receiver's firewall.
+- Allow LanAudio or Terminal to use the microphone in System Settings >
+  Privacy & Security > Microphone.
+- If an interface reports inputs=0, Core Audio exposes that entry as
+  output-only. Check Audio MIDI Setup for a separate input entry, then verify
+  the cable, power, firmware/driver, and microphone permission.
+- LanAudio sends microphone/audio-input audio. It does not capture arbitrary
+  macOS system audio.
+- Media is SRTP AEAD_AES_128_GCM after a TLS 1.3 pairing handshake. The
+  six-digit code is only a comparison aid and is never used as a key.
