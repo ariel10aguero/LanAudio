@@ -29,6 +29,7 @@ enum class ControlMessageType : std::uint8_t {
   goodbye = 6,
   pair_confirm = 7,
   pair_result = 8,
+  trust_status = 9,
 };
 
 enum class RejectReason : std::uint8_t {
@@ -82,6 +83,12 @@ struct PairResultMessage {
   std::string detail;
 };
 
+// Sent by both peers right after hello. Pairing runs when either side does
+// not yet trust the other, so both devices always take the same path.
+struct TrustStatusMessage {
+  bool trusted{};
+};
+
 enum class CodecError {
   none,
   truncated,
@@ -111,6 +118,8 @@ enum class CodecError {
                           std::vector<std::byte>& frame);
 [[nodiscard]] bool encode(const PairResultMessage& message,
                           std::vector<std::byte>& frame);
+[[nodiscard]] bool encode(const TrustStatusMessage& message,
+                          std::vector<std::byte>& frame);
 
 // Reads the frame header only. Returns the total frame size when a complete
 // frame is present, 0 when more bytes are required, and sets error on an
@@ -137,5 +146,7 @@ enum class CodecError {
                                 PairConfirmMessage& message);
 [[nodiscard]] CodecError decode(std::span<const std::byte> frame,
                                 PairResultMessage& message);
+[[nodiscard]] CodecError decode(std::span<const std::byte> frame,
+                                TrustStatusMessage& message);
 
 }  // namespace lanaudio::protocol

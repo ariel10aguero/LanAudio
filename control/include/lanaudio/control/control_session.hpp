@@ -46,6 +46,14 @@ enum class HandshakeStatus {
                                              PeerInfo& peer,
                                              std::string& error);
 
+// Tells the peer whether this device already trusts it and learns the peer's
+// answer. Each side still enforces its own trust list; the exchange only
+// makes both sides agree on whether pairing must run.
+[[nodiscard]] HandshakeStatus exchange_trust_status(TlsChannel& channel,
+                                                    bool locally_trusted,
+                                                    bool& peer_trusts_us,
+                                                    std::string& error);
+
 // Collects the sample rates and packet durations this device can carry.
 [[nodiscard]] protocol::DeviceCapabilities local_capabilities(
     std::uint32_t preferred_sample_rate = protocol::kPreferredSampleRate);

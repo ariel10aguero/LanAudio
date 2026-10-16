@@ -85,6 +85,8 @@ class NetworkReceiver {
 
  private:
   static constexpr std::size_t kResumeFadeFrames = 64;
+  static constexpr std::size_t kMaxConcealedPackets = 3;
+  static constexpr std::size_t kConcealCrossfadeFrames = 32;
   struct AudioBlock {
     std::array<float, kMaxPayloadBytes / sizeof(std::int16_t)> samples{};
     std::uint16_t count{};
@@ -109,6 +111,8 @@ class NetworkReceiver {
   double resample_phase_{};
   bool resampler_primed_{};
   std::size_t fade_in_remaining_{};
+  std::size_t frames_above_high_water_{};
+  bool playback_started_{};
   std::atomic<bool> muted_{false};
   Endpoint peer_{};
 };

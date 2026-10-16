@@ -59,6 +59,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
       (void)lanaudio::protocol::decode(bytes, message);
       break;
     }
+    case lanaudio::protocol::ControlMessageType::trust_status: {
+      lanaudio::protocol::TrustStatusMessage message;
+      (void)lanaudio::protocol::decode(bytes, message);
+      break;
+    }
   }
   return 0;
 }

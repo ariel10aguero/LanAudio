@@ -260,8 +260,11 @@ class MainWindow final : public QMainWindow {
     configure_combo(&profile_);
     configure_combo(&preferred_rate_);
     configure_combo(&device_buffer_);
-    profile_.addItems({"Ultra-low (2 packets)", "Balanced (4 packets)",
-                       "Reliable (8 packets)"});
+    profile_.addItem("Ultra-low (2 packets)", 2);
+    profile_.addItem("Balanced (4 packets)", 4);
+    profile_.addItem("Reliable (8 packets)", 8);
+    profile_.addItem("Wi-Fi (16 packets)", 16);
+    profile_.addItem("Congested Wi-Fi (32 packets)", 32);
     profile_.setCurrentIndex(1);
     preferred_rate_.addItem("Automatic (prefer 48 kHz)", 48'000);
     preferred_rate_.addItem("44.1 kHz", 44'100);
@@ -790,6 +793,12 @@ class MainWindow final : public QMainWindow {
                                QString::fromStdString(snapshot.message)));
     const bool confirming =
         snapshot.state == lanaudio::control::SessionState::confirm_code;
+    // A receiver keeps accepting connections, so every new code needs a
+    // fresh confirmation; the previous attempt's click must not disable it.
+    if (snapshot.pending_code != last_pending_code_) {
+      last_pending_code_ = snapshot.pending_code;
+      pairing_confirmed_locally_ = false;
+    }
     confirm_button_.setEnabled(confirming && !pairing_confirmed_locally_);
     decline_button_.setEnabled(confirming && !pairing_confirmed_locally_);
     if (confirming && pairing_confirmed_locally_) {
@@ -854,9 +863,8 @@ class MainWindow final : public QMainWindow {
           static_cast<std::uint16_t>(control_port_.value());
       options.preferred_sample_rate =
           static_cast<std::uint32_t>(preferred_rate_.currentData().toUInt());
-      options.preferred_jitter_packets = static_cast<std::uint16_t>(
-          profile_.currentIndex() == 0 ? 2
-                                       : (profile_.currentIndex() == 1 ? 4 : 8));
+      options.preferred_jitter_packets =
+          static_cast<std::uint16_t>(profile_.currentData().toUInt());
       sender_ = std::make_unique<lanaudio::control::SecureSender>(context_,
                                                                   options);
       if (!sender_->start(error)) {
@@ -926,6 +934,7 @@ class MainWindow final : public QMainWindow {
     session_active_ = false;
     trust_refreshed_for_session_ = false;
     pairing_confirmed_locally_ = false;
+    last_pending_code_.clear();
     audio_error_shown_ = false;
     audio_sample_rate_ = 0;
     preview_input_level_.store(0, std::memory_order_relaxed);
@@ -1020,6 +1029,7 @@ class MainWindow final : public QMainWindow {
   bool muted_{};
   bool trust_refreshed_for_session_{};
   bool pairing_confirmed_locally_{};
+  std::string last_pending_code_;
   bool audio_error_shown_{};
   std::uint32_t audio_sample_rate_{};
   std::atomic<int> preview_input_level_{};

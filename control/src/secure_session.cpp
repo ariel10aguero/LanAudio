@@ -75,19 +75,29 @@ bool allows_media(SessionState state) noexcept {
          state == SessionState::streaming;
 }
 
+void PairingGate::arm(const std::string& code) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  code_ = code;
+  waiting_ = true;
+  // Any decision recorded before this code existed is stale.
+  decided_ = false;
+  accepted_ = false;
+}
+
 bool PairingGate::await_decision(const std::string& code,
                                  std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(mutex_);
-  code_ = code;
-  waiting_ = true;
-  // Keep an already-latched Codes-match click; only wait if the UI has not
-  // confirmed yet.
-  if (!decided_) {
-    signal_.wait_for(lock, timeout, [this] { return decided_; });
+  if (!waiting_ || code_ != code) {
+    code_ = code;
+    waiting_ = true;
+    decided_ = false;
+    accepted_ = false;
   }
+  signal_.wait_for(lock, timeout,
+                   [this] { return decided_ || cancelled_; });
   waiting_ = false;
   code_.clear();
-  const bool accepted = decided_ && accepted_;
+  const bool accepted = decided_ && accepted_ && !cancelled_;
   decided_ = false;
   accepted_ = false;
   return accepted;
@@ -96,13 +106,22 @@ bool PairingGate::await_decision(const std::string& code,
 void PairingGate::decide(bool accept) {
   {
     const std::lock_guard<std::mutex> lock(mutex_);
+    // A click is only meaningful while a code is on screen. Latching it
+    // otherwise would silently approve the next pairing attempt.
+    if (!waiting_) return;
     accepted_ = accept;
     decided_ = true;
   }
   signal_.notify_all();
 }
 
-void PairingGate::cancel() { decide(false); }
+void PairingGate::cancel() {
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    cancelled_ = true;
+  }
+  signal_.notify_all();
+}
 
 std::string PairingGate::pending_code() const {
   const std::lock_guard<std::mutex> lock(mutex_);
@@ -245,19 +264,40 @@ bool SecureEndpoint::authenticate(TlsChannel& channel, bool allow_pairing,
   }
   publish_peer(peer);
 
-  if (context_->trust().contains(peer.fingerprint)) return true;
+  // Both sides must take the same path. If only one side still trusts the
+  // other (for example after Remove or Reset trust on one Mac), deciding
+  // locally left one device skipping pairing while the other waited for it.
+  const bool locally_trusted = context_->trust().contains(peer.fingerprint);
+  bool peer_trusts_us = false;
+  const auto trust_status = exchange_trust_status(channel, locally_trusted,
+                                                  peer_trusts_us, error);
+  if (trust_status != HandshakeStatus::ok) {
+    if (error.empty()) error = describe(trust_status);
+    publish(SessionState::connection_lost, error);
+    return false;
+  }
+  if (locally_trusted && peer_trusts_us) return true;
 
   if (!allow_pairing) {
-    error = "device " + peer.device_name +
-            " is not paired; enable pairing to trust it";
+    error = locally_trusted
+                ? peer.device_name +
+                      " no longer trusts this device; pair again to continue"
+                : "device " + peer.device_name +
+                      " is not paired; enable pairing to trust it";
     publish(SessionState::trust_revoked, error);
     return false;
   }
 
   publish(SessionState::pairing_required,
-          "Pairing required with " + peer.device_name);
+          locally_trusted
+              ? peer.device_name + " no longer trusts this device; "
+                                   "pairing again"
+              : "Pairing required with " + peer.device_name);
   const ConfirmCodeCallback confirm = [this](const std::string& code,
                                              const PeerInfo&) {
+    // Arm before the UI can see the code, so a click is only accepted for
+    // this code and never carried over from an earlier attempt.
+    gate_.arm(code);
     publish(SessionState::confirm_code,
             "Confirm that both devices show " + code);
     {

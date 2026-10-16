@@ -1,8 +1,9 @@
 # Protocol
 
 LanAudio uses two channels: a TLS 1.3 control connection and SRTP-protected
-RTP/UDP media. Control protocol version 2 is required. Version 1 was the
-unnegotiated 0.1 prototype and is rejected.
+RTP/UDP media. Control protocol version 3 is required. Version 2 lacked the
+trust_status exchange and is rejected; version 1 was the unnegotiated 0.1
+prototype.
 
 ## Control frames
 
@@ -21,8 +22,12 @@ Message types:
 6. goodbye
 7. pair_confirm — accepted flag plus transcript digest
 8. pair_result — whether the peer stored the fingerprint
+9. trust_status — whether the sender already trusts the peer
 
 Hello fingerprints must match the certificate used in the TLS handshake.
+Both peers send trust_status right after hello. Pairing runs when either
+side does not trust the other, so a trust entry removed on only one device
+leads to a fresh pairing on both instead of a stalled handshake.
 
 ## Format negotiation
 

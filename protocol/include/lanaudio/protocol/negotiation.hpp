@@ -9,8 +9,8 @@ namespace lanaudio::protocol {
 
 // Control protocol version implemented by this build. Version 1 was the
 // unnegotiated 0.1 media prototype and is no longer accepted.
-inline constexpr std::uint16_t kControlProtocolVersion = 2;
-inline constexpr std::uint16_t kMinimumControlProtocolVersion = 2;
+inline constexpr std::uint16_t kControlProtocolVersion = 3;
+inline constexpr std::uint16_t kMinimumControlProtocolVersion = 3;
 
 // Conservative application payload limit shared with the media protocol. The
 // SRTP authentication tag and RTP header are accounted for separately.

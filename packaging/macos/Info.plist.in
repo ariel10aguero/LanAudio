@@ -23,6 +23,8 @@
   <string>@LANAUDIO_BUILD_NUMBER@</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.music</string>
+  <key>LSAppNapIsDisabled</key>
+  <true/>
   <key>LSMinimumSystemVersion</key>
   <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
   <key>LanAudioBuildArchitecture</key>

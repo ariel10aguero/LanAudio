@@ -52,13 +52,15 @@ struct SessionSnapshot {
 // Blocks the control worker while the user compares the six-digit code.
 class PairingGate {
  public:
-  // Worker side. Returns the user's decision, or false on timeout.
-  // A Codes-match click that arrives slightly before the worker starts
-  // waiting is latched so the GUI cannot lose the confirmation.
+  // Worker side. Call arm() before the code is shown so that a click made
+  // as soon as it appears is not lost, then await_decision(). Returns the
+  // user's decision, or false on timeout or cancellation.
+  void arm(const std::string& code);
   [[nodiscard]] bool await_decision(const std::string& code,
                                     std::chrono::milliseconds timeout);
-  // UI side.
+  // UI side. Ignored unless a code is awaiting confirmation.
   void decide(bool accept);
+  // Permanently rejects current and future confirmations (endpoint stop).
   void cancel();
   [[nodiscard]] std::string pending_code() const;
   [[nodiscard]] bool waiting() const;
@@ -70,6 +72,7 @@ class PairingGate {
   bool waiting_{};
   bool decided_{};
   bool accepted_{};
+  bool cancelled_{};
 };
 
 // Shared device state: the persistent identity and the pinned peer list.

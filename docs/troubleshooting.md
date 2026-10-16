@@ -56,9 +56,31 @@ once so macOS presents the permission prompt.
 
 ## Dropouts
 
-Use wired Ethernet, select 5 ms packets, raise `--jitter-packets` from 2 to 4 or
-8, and request a 128-frame device buffer. Disable Wi-Fi power saving where
-appropriate. Do not use Bluetooth output for latency testing.
+Use wired Ethernet when possible. On Wi-Fi, pick the "Wi-Fi (16 packets)" or
+"Congested Wi-Fi (32 packets)" latency profile on the sender (CLI:
+`--jitter-packets 16`) and a 256-frame device buffer. The sender chooses the
+profile; the receiver adopts it.
+
+Read the receiver statistics (`lanaudio-cli receive --stats-interval-ms 1000`
+prints them every second):
+
+- `lost` rising while `late` stays at 0 means datagrams never arrive. This is
+  the Wi-Fi link or the sender, not playback. A 2-Mac Wi-Fi test measured
+  about 15% loss with ping times of 2–219 ms.
+- `underruns` and `overruns` rising together mean audio arrives in bursts:
+  a stall empties the buffer, then a burst overfills it. Use a larger profile.
+
+macOS AWDL (AirDrop, Handoff, Universal Control) periodically moves the Wi-Fi
+radio off-channel and causes 20–100 ms stalls. For a session it can be turned
+off with `sudo ifconfig awdl0 down` on both Macs; it returns after a reboot.
+Do not use Bluetooth output for latency testing.
+
+## No pairing code appears
+
+That is expected once two Macs are paired: later connections are
+authenticated by the pinned identity, and the code is shown only for the
+first pairing. To pair again, use Reset trust on both Macs. If only one Mac
+removed the other, both now detect that and show a new code.
 
 ## Developer build without network access
 

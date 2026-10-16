@@ -152,6 +152,35 @@ HandshakeStatus exchange_hello(TlsChannel& channel, const LocalInfo& local,
   return HandshakeStatus::ok;
 }
 
+HandshakeStatus exchange_trust_status(TlsChannel& channel,
+                                      bool locally_trusted,
+                                      bool& peer_trusts_us,
+                                      std::string& error) {
+  protocol::TrustStatusMessage outgoing;
+  outgoing.trusted = locally_trusted;
+  if (!send(channel, outgoing, error)) return HandshakeStatus::closed;
+
+  std::vector<std::byte> frame;
+  protocol::ControlMessageType type{};
+  const auto status = receive(channel, frame, kHandshakeTimeout, type, error);
+  if (status != HandshakeStatus::ok) return status;
+  if (type == protocol::ControlMessageType::session_reject) {
+    return adopt_reject(frame, error);
+  }
+  if (type != protocol::ControlMessageType::trust_status) {
+    error = "expected a trust status frame";
+    return HandshakeStatus::protocol_error;
+  }
+  protocol::TrustStatusMessage incoming;
+  const auto codec = protocol::decode(frame, incoming);
+  if (codec != protocol::CodecError::none) {
+    error = protocol::describe(codec);
+    return HandshakeStatus::protocol_error;
+  }
+  peer_trusts_us = incoming.trusted;
+  return HandshakeStatus::ok;
+}
+
 protocol::DeviceCapabilities local_capabilities(
     std::uint32_t preferred_sample_rate) {
   protocol::DeviceCapabilities capabilities;

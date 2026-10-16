@@ -7,6 +7,10 @@
 #include <chrono>
 #include <cmath>
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 namespace lanaudio {
 namespace {
 
@@ -17,6 +21,15 @@ std::uint32_t level_milli(std::span<const float> samples) noexcept {
   }
   return static_cast<std::uint32_t>(
       std::clamp(peak, 0.0F, 1.0F) * 1'000.0F);
+}
+
+// Media threads wake every few milliseconds. Without an interactive QoS class
+// macOS coalesces their timers (and App Nap throttles them further), which
+// turns a steady packet stream into bursts the receiver cannot absorb.
+void promote_media_thread() noexcept {
+#ifdef __APPLE__
+  (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 }
 
 std::uint64_t monotonic_micros() noexcept {
@@ -93,6 +106,7 @@ void NetworkSender::push_audio(std::span<const float> interleaved) noexcept {
 }
 
 void NetworkSender::run() noexcept {
+  promote_media_thread();
   Packetizer packetizer(config_.format, config_.ssrc);
   AudioBlock block;
   std::array<std::byte, kMaxProtectedPacketBytes> wire{};
@@ -176,12 +190,16 @@ void NetworkReceiver::drain_queue() noexcept {
   resampler_primed_ = false;
   resample_phase_ = 0.0;
   fade_in_remaining_ = 0;
+  frames_above_high_water_ = 0;
+  playback_started_ = false;
 }
 
 void NetworkReceiver::run() noexcept {
+  promote_media_thread();
   std::array<std::byte, kMaxProtectedPacketBytes> wire{};
-  std::array<float, 2> conceal_from{};
+  AudioBlock last_block{};
   bool have_audio = false;
+  std::size_t consecutive_losses = 0;
   protocol::AbuseGuard guard;
 
   while (running_.load(std::memory_order_acquire)) {
@@ -265,20 +283,32 @@ void NetworkReceiver::run() noexcept {
       if (pop_result == JitterBuffer::PopResult::waiting) break;
       if (pop_result == JitterBuffer::PopResult::missing) {
         metrics_.lost_packets.fetch_add(1, std::memory_order_relaxed);
+        // Repeat the last good packet with a decaying gain. For sustained
+        // tones this is far less audible than a 5 ms gap of silence, and
+        // after kMaxConcealedPackets the output settles to silence.
         AudioBlock concealed;
         concealed.count =
             static_cast<std::uint16_t>(config_.format.samples_per_packet());
         concealed.samples.fill(0.0F);
-        if (have_audio) {
-          const auto fade_frames = std::min<std::size_t>(
-              32, config_.format.frames_per_packet);
-          for (std::size_t frame = 0; frame < fade_frames; ++frame) {
+        if (have_audio && consecutive_losses < kMaxConcealedPackets) {
+          const auto frames = std::min<std::size_t>(
+              config_.format.frames_per_packet, last_block.count / 2);
+          const float start =
+              1.0F - static_cast<float>(consecutive_losses) /
+                         static_cast<float>(kMaxConcealedPackets);
+          const float end =
+              1.0F - static_cast<float>(consecutive_losses + 1) /
+                         static_cast<float>(kMaxConcealedPackets);
+          for (std::size_t frame = 0; frame < frames; ++frame) {
             const float gain =
-                static_cast<float>(fade_frames - frame) / fade_frames;
-            concealed.samples[frame * 2] = conceal_from[0] * gain;
-            concealed.samples[frame * 2 + 1] = conceal_from[1] * gain;
+                start + (end - start) * static_cast<float>(frame) /
+                            static_cast<float>(frames);
+            concealed.samples[frame * 2] = last_block.samples[frame * 2] * gain;
+            concealed.samples[frame * 2 + 1] =
+                last_block.samples[frame * 2 + 1] * gain;
           }
         }
+        ++consecutive_losses;
         if (!queue_.try_push(concealed)) {
           // The playback queue is full; stop draining so the network thread
           // returns to reading sockets instead of spinning on a full queue.
@@ -292,9 +322,30 @@ void NetworkReceiver::run() noexcept {
       l16be_to_float(
           std::span<const std::byte>(ready.payload.data(), ready.payload_size),
           std::span<float>(block.samples.data(), block.count));
+      if (consecutive_losses != 0 && have_audio) {
+        // Crossfade out of the concealment so the real packet does not
+        // start with a step discontinuity.
+        const float tail =
+            consecutive_losses >= kMaxConcealedPackets
+                ? 0.0F
+                : 1.0F - static_cast<float>(consecutive_losses) /
+                             static_cast<float>(kMaxConcealedPackets);
+        const auto frames = std::min<std::size_t>(
+            kConcealCrossfadeFrames,
+            std::min<std::size_t>(block.count, last_block.count) / 2);
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+          const float w = static_cast<float>(frame + 1) /
+                          static_cast<float>(frames + 1);
+          for (std::size_t ch = 0; ch < 2; ++ch) {
+            const auto i = frame * 2 + ch;
+            block.samples[i] =
+                block.samples[i] * w + last_block.samples[i] * tail * (1.0F - w);
+          }
+        }
+      }
+      consecutive_losses = 0;
       if (block.count >= 2) {
-        conceal_from[0] = block.samples[block.count - 2];
-        conceal_from[1] = block.samples[block.count - 1];
+        last_block = block;
         have_audio = true;
       }
       if (!queue_.try_push(block)) {
@@ -360,10 +411,22 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
     }
   }
 
-  // Bound latency. Audio queued before the output device started, or a burst
-  // after a stall, would otherwise keep the queue pinned at capacity, where
-  // the network thread drops packets and the stream clicks continuously.
+  // Bound latency, but only when the excess persists for a second. Wi-Fi
+  // delivers audio in bursts after a stall, and that burst is exactly the
+  // audio needed to ride out the next stall; trimming it immediately turned
+  // every burst into an underrun.
   if (queue_.size_approx() > high_water_blocks) {
+    frames_above_high_water_ += interleaved.size() / 2;
+  } else {
+    frames_above_high_water_ = 0;
+  }
+  // Audio that piled up before the output device first started is stale, so
+  // that backlog is trimmed immediately.
+  if (!playback_started_ && queue_.size_approx() > high_water_blocks) {
+    frames_above_high_water_ = config_.format.sample_rate;
+  }
+  if (frames_above_high_water_ >= config_.format.sample_rate) {
+    frames_above_high_water_ = 0;
     AudioBlock discarded;
     while (queue_.size_approx() > target_blocks && queue_.try_pop(discarded)) {
     }
@@ -378,6 +441,7 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
       return;
     }
     resampler_primed_ = true;
+    playback_started_ = true;
     // A fresh cushion invalidates the controller's integral state.
     drift_.reset();
   }

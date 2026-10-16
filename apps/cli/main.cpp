@@ -101,9 +101,12 @@ void print_metrics(const lanaudio::StreamMetrics& metrics) {
   std::cout << "sent=" << metrics.packets_sent.load()
             << " received=" << metrics.packets_received.load()
             << " malformed=" << metrics.malformed_packets.load()
+            << " lost=" << metrics.lost_packets.load()
             << " late=" << metrics.late_packets.load()
             << " underruns=" << metrics.underruns.load()
             << " overruns=" << metrics.overruns.load()
+            << " jitter_buffer=" << metrics.jitter_buffer_packets.load()
+            << " drift_ppm=" << metrics.drift_ppm.load()
             << " decrypt_fail=" << metrics.decrypt_failures.load()
             << " replay=" << metrics.replay_rejections.load()
             << " foreign=" << metrics.foreign_source_rejections.load()
@@ -155,7 +158,7 @@ void usage() {
       << "      [--preferred-rate 48000] [--jitter-packets 4]\n"
       << "  lanaudio receive [--control-port 5005] [--media-port 5004]\n"
       << "      [--output ID] [--output-channel 1] [--buffer-frames 128]\n"
-      << "      [--preferred-rate 48000]\n"
+      << "      [--preferred-rate 48000] [--stats-interval-ms 0]\n"
 #else
       << "  lanaudio send / receive  (unavailable: this build has no security "
          "stack)\n"
@@ -435,8 +438,10 @@ int receive(int argc, char** argv) {
       parse_u32_option(argc, argv, "--buffer-frames", 128, 4'096, error);
   const auto preferred_rate =
       parse_u32_option(argc, argv, "--preferred-rate", 48'000, 192'000, error);
+  const auto stats_interval_ms =
+      parse_u32_option(argc, argv, "--stats-interval-ms", 0, 3'600'000, error);
   if (!control_port || !media_port || !output || !output_channel ||
-      !buffer_frames || !preferred_rate) {
+      !buffer_frames || !preferred_rate || !stats_interval_ms) {
     std::cerr << error << '\n';
     return 2;
   }
@@ -463,6 +468,7 @@ int receive(int argc, char** argv) {
   std::unique_ptr<lanaudio::RtAudioBackend> audio;
   bool opened = false;
   std::uint32_t frames = *buffer_frames;
+  auto last_stats = std::chrono::steady_clock::now();
   install_signals();
   std::cout << "secure receive on control port " << receiver.control_port()
             << "; waiting for a paired sender. Ctrl-C to stop\n";
@@ -503,6 +509,14 @@ int receive(int argc, char** argv) {
       audio.reset();
       opened = false;
       std::cout << snapshot.message << '\n';
+    }
+    if (opened && *stats_interval_ms != 0) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_stats >= std::chrono::milliseconds(*stats_interval_ms)) {
+        last_stats = now;
+        if (const auto* metrics = receiver.metrics()) print_metrics(*metrics);
+        std::cout << std::flush;
+      }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }

@@ -243,7 +243,7 @@ CodecError frame_type(std::span<const std::byte> frame,
   }
   const auto raw = std::to_integer<std::uint8_t>(frame[2]);
   if (raw < static_cast<std::uint8_t>(ControlMessageType::hello) ||
-      raw > static_cast<std::uint8_t>(ControlMessageType::pair_result)) {
+      raw > static_cast<std::uint8_t>(ControlMessageType::trust_status)) {
     return CodecError::unknown_type;
   }
   type = static_cast<ControlMessageType>(raw);
@@ -466,6 +466,29 @@ CodecError decode(std::span<const std::byte> frame,
   Reader reader(body);
   const auto trusted = reader.u8();
   message.detail = reader.text();
+  const auto error = reader.finish();
+  if (error != CodecError::none) return error;
+  if (trusted > 1U) return CodecError::invalid_value;
+  message.trusted = trusted == 1U;
+  return CodecError::none;
+}
+
+bool encode(const TrustStatusMessage& message, std::vector<std::byte>& frame) {
+  Writer writer(ControlMessageType::trust_status);
+  writer.u8(message.trusted ? 1U : 0U);
+  return writer.finish(frame);
+}
+
+CodecError decode(std::span<const std::byte> frame,
+                  TrustStatusMessage& message) {
+  std::span<const std::byte> body;
+  if (const auto error =
+          open_frame(frame, ControlMessageType::trust_status, body);
+      error != CodecError::none) {
+    return error;
+  }
+  Reader reader(body);
+  const auto trusted = reader.u8();
   const auto error = reader.finish();
   if (error != CodecError::none) return error;
   if (trusted > 1U) return CodecError::invalid_value;

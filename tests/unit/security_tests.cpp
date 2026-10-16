@@ -662,6 +662,111 @@ void test_stop_unblocks_pairing_wait() {
   CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
 }
 
+void test_one_sided_trust_pairs_again_on_both_devices() {
+  auto endpoints = make_endpoints();
+  if (!endpoints.receiver || !endpoints.sender) return;
+  std::string error;
+  // Only the receiver remembers the sender, as after Reset trust on the
+  // sender. Both devices must show a code instead of diverging.
+  CHECK(endpoints.receiver->trust().add(
+      endpoints.sender->identity().fingerprint(), "Sender Mac", error));
+
+  control::SecureReceiver::Options receiver_options;
+  receiver_options.control_port = 45'113;
+  receiver_options.media_port = 45'112;
+  receiver_options.advertise = false;
+  control::SecureReceiver receiver(endpoints.receiver, receiver_options);
+  CHECK(receiver.start(error));
+
+  control::SecureSender::Options sender_options;
+  sender_options.host = "127.0.0.1";
+  sender_options.control_port = receiver_options.control_port;
+  control::SecureSender sender(endpoints.sender, sender_options);
+  CHECK(sender.start(error));
+
+  std::string receiver_code;
+  std::string sender_code;
+  std::thread receiver_confirm(
+      [&] { confirm_when_asked(receiver, receiver_code, true); });
+  std::thread sender_confirm(
+      [&] { confirm_when_asked(sender, sender_code, true); });
+  receiver_confirm.join();
+  sender_confirm.join();
+  CHECK(receiver_code.size() == 6);
+  CHECK(receiver_code == sender_code);
+
+  const bool streaming = wait_for(
+      [&] {
+        return sender.snapshot().state == control::SessionState::streaming &&
+               receiver.snapshot().state == control::SessionState::streaming;
+      },
+      std::chrono::seconds(15));
+  CHECK(streaming);
+  CHECK(endpoints.sender->trust().contains(
+      endpoints.receiver->identity().fingerprint()));
+  sender.stop();
+  receiver.stop();
+}
+
+void test_mutual_trust_skips_the_code() {
+  auto endpoints = make_endpoints();
+  if (!endpoints.receiver || !endpoints.sender) return;
+  std::string error;
+  CHECK(endpoints.receiver->trust().add(
+      endpoints.sender->identity().fingerprint(), "Sender Mac", error));
+  CHECK(endpoints.sender->trust().add(
+      endpoints.receiver->identity().fingerprint(), "Receiver Mac", error));
+
+  control::SecureReceiver::Options receiver_options;
+  receiver_options.control_port = 45'115;
+  receiver_options.media_port = 45'114;
+  receiver_options.advertise = false;
+  receiver_options.allow_pairing = false;
+  control::SecureReceiver receiver(endpoints.receiver, receiver_options);
+  CHECK(receiver.start(error));
+
+  control::SecureSender::Options sender_options;
+  sender_options.host = "127.0.0.1";
+  sender_options.control_port = receiver_options.control_port;
+  sender_options.allow_pairing = false;
+  control::SecureSender sender(endpoints.sender, sender_options);
+  CHECK(sender.start(error));
+
+  const bool streaming = wait_for(
+      [&] {
+        return sender.snapshot().state == control::SessionState::streaming &&
+               receiver.snapshot().state == control::SessionState::streaming;
+      },
+      std::chrono::seconds(15));
+  CHECK(streaming);
+  sender.stop();
+  receiver.stop();
+}
+
+void test_pairing_gate_ignores_stale_clicks() {
+  control::PairingGate gate;
+  // A click with no code on screen must not approve the next pairing.
+  gate.decide(true);
+  CHECK(!gate.await_decision("123456", std::chrono::milliseconds(50)));
+
+  // A click for an armed code is honoured even if it lands before the
+  // worker starts waiting.
+  gate.arm("654321");
+  gate.decide(true);
+  CHECK(gate.await_decision("654321", std::chrono::milliseconds(50)));
+
+  // Re-arming discards a decision made for a previous code.
+  gate.arm("111111");
+  gate.decide(true);
+  gate.arm("222222");
+  CHECK(!gate.await_decision("222222", std::chrono::milliseconds(50)));
+
+  gate.cancel();
+  gate.arm("333333");
+  gate.decide(true);
+  CHECK(!gate.await_decision("333333", std::chrono::milliseconds(50)));
+}
+
 }  // namespace
 
 int main() {
@@ -684,6 +789,9 @@ int main() {
   test_secure_session_refuses_unpaired_peer();
   test_secure_session_aborts_when_code_is_declined();
   test_stop_unblocks_pairing_wait();
+  test_one_sided_trust_pairs_again_on_both_devices();
+  test_mutual_trust_skips_the_code();
+  test_pairing_gate_ignores_stale_clicks();
   if (failures == 0) std::cout << "all LanAudio security tests passed\n";
   return failures == 0 ? 0 : 1;
 }
