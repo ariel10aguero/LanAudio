@@ -189,22 +189,32 @@ void test_spsc_boundaries() {
 }
 
 void test_drift_controller() {
-  for (const double device_drift : {-200.0, -100.0, -50.0, 50.0, 100.0,
-                                    200.0}) {
-    lanaudio::DriftController::Config config;
-    config.target_packets = 4.0;
-    lanaudio::DriftController controller(config);
-    double occupancy = config.target_packets;
-    for (int i = 0; i < 500'000; ++i) {
-      const double ratio = controller.update(occupancy);
-      const double correction = (ratio - 1.0) * 1.0e6;
-      // Model one 64-frame callback. Occupancy is expressed in 240-frame
-      // packets, so ppm rate error is scaled by 64 / 240 per callback.
-      occupancy +=
-          (device_drift - correction) * 64.0 / (1.0e6 * 240.0);
+  // Includes the +5,700 ppm offset measured between two real Macs.
+  for (const double device_drift : {-8'000.0, -200.0, -50.0, 50.0, 200.0,
+                                    5'700.0}) {
+    for (const double callback_frames : {64.0, 256.0}) {
+      lanaudio::DriftController::Config config;
+      config.target_packets = 4.0;
+      lanaudio::DriftController controller(config);
+      double occupancy = config.target_packets;
+      double peak_error = 0.0;
+      const double dt = callback_frames / 48'000.0;
+      // Five simulated minutes.
+      const auto steps = static_cast<int>(300.0 / dt);
+      for (int i = 0; i < steps; ++i) {
+        const double ratio = controller.update(occupancy, dt);
+        const double correction = (ratio - 1.0) * 1.0e6;
+        // Occupancy is in 240-frame packets.
+        occupancy += (device_drift - correction) * 1.0e-6 * callback_frames /
+                     240.0;
+        peak_error =
+            std::max(peak_error, std::abs(occupancy - config.target_packets));
+      }
+      CHECK(std::abs(controller.correction_ppm() - device_drift) < 5.0);
+      CHECK(std::abs(occupancy - config.target_packets) < 0.25);
+      // The transient must stay well inside the trim threshold.
+      CHECK(peak_error < 6.0);
     }
-    CHECK(std::abs(controller.correction_ppm() - device_drift) < 5.0);
-    CHECK(std::abs(occupancy - config.target_packets) < 0.25);
   }
 }
 

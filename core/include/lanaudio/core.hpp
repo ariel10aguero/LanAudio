@@ -136,6 +136,10 @@ struct StreamMetrics {
   std::atomic<std::uint64_t> foreign_source_rejections{};
   std::atomic<std::uint64_t> rate_limited_packets{};
   std::atomic<std::uint64_t> stream_resyncs{};
+  // Sender only: datagrams the OS refused even after retrying, and retries
+  // caused by a full interface queue.
+  std::atomic<std::uint64_t> send_failures{};
+  std::atomic<std::uint64_t> send_retries{};
   std::atomic<std::uint64_t> media_callbacks{};
   std::atomic<std::uint64_t> last_media_micros{};
   std::atomic<bool> session_active{};
@@ -224,19 +228,33 @@ class JitterBuffer {
   bool sequence_initialized_{};
 };
 
+// PI controller that steers the receiver's resampling ratio so the playout
+// queue stays at its target depth. Gains are in real time units, so the loop
+// behaves the same for any device buffer size.
 class DriftController {
  public:
   struct Config {
     double target_packets{2.0};
-    double kp{100.0};
-    double ki{0.01};
-    double smoothing{0.02};
-    double max_ppm{250.0};
+    // ppm of correction per packet of occupancy error.
+    double kp{1'200.0};
+    // ppm per packet-second of accumulated error.
+    double ki{110.0};
+    // Time constant of the occupancy low-pass filter, which keeps network
+    // bursts from turning into audible pitch wobble.
+    double smoothing_seconds{1.0};
+    // Two devices that each claim 48 kHz were measured 5,700 ppm apart, so
+    // the range must cover far more than crystal tolerance.
+    double max_ppm{10'000.0};
   };
 
   DriftController() noexcept;
   explicit DriftController(Config config) noexcept;
-  [[nodiscard]] double update(double occupancy_packets) noexcept;
+  // `elapsed_seconds` is the audio time rendered since the previous update.
+  [[nodiscard]] double update(double occupancy_packets,
+                              double elapsed_seconds) noexcept;
+  // Forgets the filtered occupancy but keeps the learned clock offset, which
+  // is a property of the two devices and survives a re-buffer.
+  void restart_filter() noexcept;
   void reset() noexcept;
   [[nodiscard]] double correction_ppm() const noexcept { return correction_ppm_; }
 
@@ -268,12 +286,17 @@ class UdpSocket {
                               std::chrono::milliseconds timeout,
                               Endpoint& source, std::string& error);
   [[nodiscard]] Endpoint destination() const noexcept;
+  // Datagrams that had to be re-sent because the interface queue was full.
+  [[nodiscard]] std::uint64_t send_retries() const noexcept {
+    return send_retries_;
+  }
   [[nodiscard]] std::uint16_t local_port(std::string& error) const;
 
  private:
   std::intptr_t handle_{-1};
   std::array<std::byte, 128> destination_{};
   std::uint32_t destination_size_{};
+  std::uint64_t send_retries_{};
 };
 
 // Resolves a host for comparison purposes without changing socket state.

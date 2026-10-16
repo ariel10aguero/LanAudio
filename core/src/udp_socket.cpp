@@ -1,7 +1,10 @@
 #include "lanaudio/core.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -115,7 +118,17 @@ UdpSocket::UdpSocket() {
                  sizeof(disabled)) != 0) {
     close_socket(as_socket(handle_));
     handle_ = -1;
+    return;
   }
+  // Roomier kernel buffers absorb Wi-Fi stalls on both ends. Failure is
+  // harmless: the defaults still work, just with less headroom.
+  int buffer_bytes = 1 << 20;
+  (void)setsockopt(as_socket(handle_), SOL_SOCKET, SO_SNDBUF,
+                   reinterpret_cast<const char*>(&buffer_bytes),
+                   sizeof(buffer_bytes));
+  (void)setsockopt(as_socket(handle_), SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&buffer_bytes),
+                   sizeof(buffer_bytes));
 }
 
 UdpSocket::~UdpSocket() {
@@ -206,10 +219,28 @@ bool UdpSocket::send(std::span<const std::byte> bytes, std::string& error) {
       reinterpret_cast<const sockaddr*>(destination_.data()),
       static_cast<int>(destination_size_));
 #else
-  const auto count =
-      ::sendto(as_socket(handle_), bytes.data(), bytes.size(), 0,
-               reinterpret_cast<const sockaddr*>(destination_.data()),
-               static_cast<socklen_t>(destination_size_));
+  // macOS returns ENOBUFS when the Wi-Fi interface queue is momentarily
+  // full (for example while the radio is off-channel). Dropping the datagram
+  // then shows up as packet loss at the receiver, so retry briefly. This runs
+  // on the sender's network thread, never in the audio callback.
+  constexpr auto kRetryBudget = std::chrono::milliseconds(4);
+  const auto deadline = std::chrono::steady_clock::now() + kRetryBudget;
+  ssize_t count = -1;
+  for (;;) {
+    count = ::sendto(as_socket(handle_), bytes.data(), bytes.size(), 0,
+                     reinterpret_cast<const sockaddr*>(destination_.data()),
+                     static_cast<socklen_t>(destination_size_));
+    if (count >= 0) break;
+    const int code = errno;
+    if ((code != ENOBUFS && code != EAGAIN && code != EWOULDBLOCK &&
+         code != EINTR) ||
+        std::chrono::steady_clock::now() >= deadline) {
+      errno = code;
+      break;
+    }
+    ++send_retries_;
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
 #endif
   if (count != static_cast<decltype(count)>(bytes.size())) {
     error = "UDP send failed: " + socket_error();

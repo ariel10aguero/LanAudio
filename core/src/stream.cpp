@@ -143,7 +143,11 @@ void NetworkSender::run() noexcept {
         metrics_.packets_sent.fetch_add(1, std::memory_order_relaxed);
         metrics_.last_media_micros.store(monotonic_micros(),
                                          std::memory_order_relaxed);
+      } else {
+        metrics_.send_failures.fetch_add(1, std::memory_order_relaxed);
       }
+      metrics_.send_retries.store(socket_.send_retries(),
+                                  std::memory_order_relaxed);
     }
   }
 }
@@ -151,9 +155,11 @@ void NetworkSender::run() noexcept {
 NetworkReceiver::NetworkReceiver(StreamConfig config)
     : config_(std::move(config)),
       jitter_(config_.jitter_packets),
-      drift_(DriftController::Config{
-          static_cast<double>(config_.jitter_packets), 100.0, 0.01, 0.02,
-          250.0}) {}
+      drift_([this] {
+        DriftController::Config drift;
+        drift.target_packets = static_cast<double>(config_.jitter_packets);
+        return drift;
+      }()) {}
 NetworkReceiver::~NetworkReceiver() { stop(); }
 
 bool NetworkReceiver::start(std::string& error) {
@@ -192,6 +198,7 @@ void NetworkReceiver::drain_queue() noexcept {
   fade_in_remaining_ = 0;
   frames_above_high_water_ = 0;
   playback_started_ = false;
+  drift_.reset();
 }
 
 void NetworkReceiver::run() noexcept {
@@ -431,7 +438,7 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
     while (queue_.size_approx() > target_blocks && queue_.try_pop(discarded)) {
     }
     metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
-    drift_.reset();
+    drift_.restart_filter();
   }
 
   if (!resampler_primed_) {
@@ -442,8 +449,10 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
     }
     resampler_primed_ = true;
     playback_started_ = true;
-    // A fresh cushion invalidates the controller's integral state.
-    drift_.reset();
+    // A fresh cushion invalidates the filtered occupancy, but not the
+    // learned clock offset; resetting that on every re-buffer meant the
+    // controller never converged on a real sender/receiver rate difference.
+    drift_.restart_filter();
   }
 
   // Include the partially consumed block so the controller sees a smooth
@@ -455,7 +464,9 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
       static_cast<double>(queue_.size_approx()) +
       static_cast<double>(current_remaining) /
           static_cast<double>(samples_per_packet);
-  const double ratio = drift_.update(occupancy);
+  const double ratio = drift_.update(
+      occupancy, static_cast<double>(interleaved.size() / 2) /
+                     static_cast<double>(config_.format.sample_rate));
   metrics_.drift_ppm.store(
       static_cast<std::int32_t>(drift_.correction_ppm()),
       std::memory_order_relaxed);

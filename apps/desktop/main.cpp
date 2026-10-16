@@ -963,7 +963,7 @@ class MainWindow final : public QMainWindow {
     output_level_.setValue(std::max(
         preview_out, static_cast<int>(value->output_level_milli.load())));
     metrics_.setText(
-        QString("Sent %1  Recv %2  Lost %3  Late %4  "
+        QString("Sent %1  SendFail %13  Recv %2  Lost %3  Late %4  "
                 "Underruns %5  Overruns %6  Buffer %7  "
                 "Drift %8 ppm  Decrypt %9  Replay %10  Foreign %11  "
                 "Resyncs %12")
@@ -978,7 +978,8 @@ class MainWindow final : public QMainWindow {
             .arg(value->decrypt_failures.load())
             .arg(value->replay_rejections.load())
             .arg(value->foreign_source_rejections.load())
-            .arg(value->stream_resyncs.load()));
+            .arg(value->stream_resyncs.load())
+            .arg(value->send_failures.load()));
   }
 
   QGroupBox* input_box_{};

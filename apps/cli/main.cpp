@@ -99,6 +99,8 @@ void install_signals() {
 
 void print_metrics(const lanaudio::StreamMetrics& metrics) {
   std::cout << "sent=" << metrics.packets_sent.load()
+            << " send_fail=" << metrics.send_failures.load()
+            << " send_retry=" << metrics.send_retries.load()
             << " received=" << metrics.packets_received.load()
             << " malformed=" << metrics.malformed_packets.load()
             << " lost=" << metrics.lost_packets.load()
