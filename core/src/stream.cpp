@@ -175,6 +175,7 @@ void NetworkReceiver::drain_queue() noexcept {
   current_offset_ = 0;
   resampler_primed_ = false;
   resample_phase_ = 0.0;
+  fade_in_remaining_ = 0;
 }
 
 void NetworkReceiver::run() noexcept {
@@ -340,28 +341,74 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
     finalize_output();
     return;
   }
-  const double ratio = drift_.update(static_cast<double>(queue_.size_approx()));
-  metrics_.drift_ppm.store(
-      static_cast<std::int32_t>(drift_.correction_ppm()),
-      std::memory_order_relaxed);
+  // Playout cushion. The jitter buffer only enforces its startup depth once;
+  // the playback queue is what actually absorbs network and device-callback
+  // jitter, so the same depth is enforced here every time playback (re)starts.
+  const auto target_blocks =
+      std::max<std::size_t>(config_.jitter_packets, 1);
+  const auto high_water_blocks =
+      target_blocks + std::max<std::size_t>(target_blocks, 8);
+
+  if (!resampler_primed_) {
+    // Wait for a full cushion instead of resuming on the first packet.
+    // Resuming at zero depth makes every later scheduling hiccup another
+    // underrun, which is heard as a constant ticking.
+    if (queue_.size_approx() < target_blocks) {
+      std::fill(interleaved.begin(), interleaved.end(), 0.0F);
+      finalize_output();
+      return;
+    }
+  }
+
+  // Bound latency. Audio queued before the output device started, or a burst
+  // after a stall, would otherwise keep the queue pinned at capacity, where
+  // the network thread drops packets and the stream clicks continuously.
+  if (queue_.size_approx() > high_water_blocks) {
+    AudioBlock discarded;
+    while (queue_.size_approx() > target_blocks && queue_.try_pop(discarded)) {
+    }
+    metrics_.overruns.fetch_add(1, std::memory_order_relaxed);
+    drift_.reset();
+  }
 
   if (!resampler_primed_) {
     if (!next_source_frame(frame_a_) || !next_source_frame(frame_b_)) {
       std::fill(interleaved.begin(), interleaved.end(), 0.0F);
-      metrics_.underruns.fetch_add(1, std::memory_order_relaxed);
       finalize_output();
       return;
     }
     resampler_primed_ = true;
+    // A fresh cushion invalidates the controller's integral state.
+    drift_.reset();
   }
+
+  // Include the partially consumed block so the controller sees a smooth
+  // occupancy rather than a sawtooth that jumps by a whole packet.
+  const auto samples_per_packet = config_.format.samples_per_packet();
+  const auto current_remaining =
+      current_.count > current_offset_ ? current_.count - current_offset_ : 0;
+  const double occupancy =
+      static_cast<double>(queue_.size_approx()) +
+      static_cast<double>(current_remaining) /
+          static_cast<double>(samples_per_packet);
+  const double ratio = drift_.update(occupancy);
+  metrics_.drift_ppm.store(
+      static_cast<std::int32_t>(drift_.correction_ppm()),
+      std::memory_order_relaxed);
 
   std::size_t output_offset = 0;
   while (output_offset + 1 < interleaved.size()) {
     const auto phase = static_cast<float>(resample_phase_);
+    float gain = 1.0F;
+    if (fade_in_remaining_ > 0) {
+      gain = static_cast<float>(kResumeFadeFrames - fade_in_remaining_) /
+             static_cast<float>(kResumeFadeFrames);
+      --fade_in_remaining_;
+    }
     interleaved[output_offset] =
-        frame_a_[0] + (frame_b_[0] - frame_a_[0]) * phase;
+        (frame_a_[0] + (frame_b_[0] - frame_a_[0]) * phase) * gain;
     interleaved[output_offset + 1] =
-        frame_a_[1] + (frame_b_[1] - frame_a_[1]) * phase;
+        (frame_a_[1] + (frame_b_[1] - frame_a_[1]) * phase) * gain;
     output_offset += 2;
     resample_phase_ += ratio;
     while (resample_phase_ >= 1.0) {
@@ -377,6 +424,8 @@ void NetworkReceiver::render_audio(std::span<float> interleaved) noexcept {
         if ((interleaved.size() & 1U) != 0) interleaved.back() = 0.0F;
         resampler_primed_ = false;
         resample_phase_ = 0.0;
+        // The tail was faded to silence, so ramp back in on resume.
+        fade_in_remaining_ = kResumeFadeFrames;
         metrics_.underruns.fetch_add(1, std::memory_order_relaxed);
         finalize_output();
         return;

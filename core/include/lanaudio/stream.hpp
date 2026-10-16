@@ -84,6 +84,7 @@ class NetworkReceiver {
   [[nodiscard]] const StreamMetrics& metrics() const noexcept { return metrics_; }
 
  private:
+  static constexpr std::size_t kResumeFadeFrames = 64;
   struct AudioBlock {
     std::array<float, kMaxPayloadBytes / sizeof(std::int16_t)> samples{};
     std::uint16_t count{};
@@ -107,6 +108,7 @@ class NetworkReceiver {
   std::array<float, 2> frame_b_{};
   double resample_phase_{};
   bool resampler_primed_{};
+  std::size_t fade_in_remaining_{};
   std::atomic<bool> muted_{false};
   Endpoint peer_{};
 };

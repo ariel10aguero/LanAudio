@@ -9,6 +9,7 @@
 #include <iostream>
 #include <span>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -339,6 +340,62 @@ void test_localhost_stream() {
   receiver.stop();
 }
 
+void test_playout_rebuffers_and_bounds_latency() {
+  TestProtector outbound;
+  TestProtector inbound;
+  lanaudio::StreamConfig config = protected_config(45'008, nullptr);
+  auto receiver_config = config;
+  receiver_config.protector = &inbound;
+  auto sender_config = config;
+  sender_config.protector = &outbound;
+  lanaudio::NetworkReceiver receiver(receiver_config);
+  lanaudio::NetworkSender sender(sender_config);
+  std::string error;
+  CHECK(receiver.start(error));
+  CHECK(sender.start(error));
+  const auto packet_samples = config.format.samples_per_packet();
+  auto send_packets = [&](std::size_t packets, std::uint64_t expected_total) {
+    std::vector<float> audio(packet_samples * packets, 0.25F);
+    sender.push_audio(audio);
+    for (int i = 0;
+         i < 100 && receiver.metrics().packets_received.load() < expected_total;
+         ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  };
+
+  // Audio that piled up before the output device started is trimmed back to
+  // the jitter target instead of pinning the queue at capacity.
+  send_packets(20, 20);
+  std::array<float, 256> output{};
+  receiver.render_audio(output);
+  CHECK(receiver.metrics().overruns.load() >= 1);
+  CHECK(output[0] > 0.24F);
+
+  // Drain the remaining cushion to force a single underrun.
+  std::array<float, 2'048> drain{};
+  receiver.render_audio(drain);
+  CHECK(receiver.metrics().underruns.load() == 1);
+
+  // One packet is not a full cushion: keep playing silence rather than
+  // resuming at zero depth and ticking on every hiccup.
+  send_packets(1, 21);
+  output.fill(1.0F);
+  receiver.render_audio(output);
+  CHECK(std::all_of(output.begin(), output.end(),
+                    [](float sample) { return sample == 0.0F; }));
+
+  // With the cushion restored, playback resumes with a fade-in.
+  send_packets(1, 22);
+  receiver.render_audio(output);
+  CHECK(output[0] < 0.01F);
+  CHECK(output[output.size() - 2] > 0.24F);
+  CHECK(receiver.metrics().underruns.load() == 1);
+  sender.stop();
+  receiver.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -352,6 +409,7 @@ int main() {
   test_drift_controller();
   test_media_requires_protection();
   test_localhost_stream();
+  test_playout_rebuffers_and_bounds_latency();
   if (failures == 0) std::cout << "all LanAudio core tests passed\n";
   return failures == 0 ? 0 : 1;
 }
