@@ -290,6 +290,14 @@ void NetworkReceiver::run() noexcept {
       if (pop_result == JitterBuffer::PopResult::waiting) break;
       if (pop_result == JitterBuffer::PopResult::missing) {
         metrics_.lost_packets.fetch_add(1, std::memory_order_relaxed);
+        // Beyond the faded-out repeats a long gap is skipped, not filled.
+        // Queueing silence for it arrived after playback had already
+        // underrun, so every Wi-Fi stall permanently added its own length
+        // to the latency and pinned the drift controller at its limit.
+        if (consecutive_losses >= kMaxConcealedPackets) {
+          ++consecutive_losses;
+          continue;
+        }
         // Repeat the last good packet with a decaying gain. For sustained
         // tones this is far less audible than a 5 ms gap of silence, and
         // after kMaxConcealedPackets the output settles to silence.
@@ -297,7 +305,7 @@ void NetworkReceiver::run() noexcept {
         concealed.count =
             static_cast<std::uint16_t>(config_.format.samples_per_packet());
         concealed.samples.fill(0.0F);
-        if (have_audio && consecutive_losses < kMaxConcealedPackets) {
+        if (have_audio) {
           const auto frames = std::min<std::size_t>(
               config_.format.frames_per_packet, last_block.count / 2);
           const float start =

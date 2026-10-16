@@ -225,9 +225,21 @@ class TestProtector final : public lanaudio::MediaProtector {
  public:
   static constexpr std::size_t kTagBytes = 8;
 
+  // Simulates a network stall: packets in [first, first + count) vanish.
+  void drop_sequences(std::uint16_t first, std::uint16_t count) noexcept {
+    drop_first_ = first;
+    drop_count_ = count;
+  }
+
   [[nodiscard]] std::size_t protect(std::span<std::byte> buffer,
                                     std::size_t size) noexcept override {
     if (size == 0 || buffer.size() - size < kTagBytes) return 0;
+    const auto outgoing =
+        static_cast<std::uint16_t>((std::to_integer<unsigned>(buffer[2]) << 8) |
+                                   std::to_integer<unsigned>(buffer[3]));
+    if (static_cast<std::uint16_t>(outgoing - drop_first_) < drop_count_) {
+      return 0;
+    }
     for (std::size_t i = 0; i < kTagBytes; ++i) {
       buffer[size + i] = std::byte{0xA5} ^ buffer[i];
     }
@@ -262,6 +274,8 @@ class TestProtector final : public lanaudio::MediaProtector {
   }
 
  private:
+  std::uint16_t drop_first_{};
+  std::uint16_t drop_count_{};
   std::array<std::uint16_t, 256> seen_{};
   std::uint64_t accepted_{};
   bool replay_{};
@@ -406,6 +420,48 @@ void test_playout_rebuffers_and_bounds_latency() {
   receiver.stop();
 }
 
+void test_long_gap_does_not_add_latency() {
+  TestProtector outbound;
+  TestProtector inbound;
+  lanaudio::StreamConfig config = protected_config(45'010, nullptr);
+  config.jitter_packets = 4;
+  auto receiver_config = config;
+  receiver_config.protector = &inbound;
+  auto sender_config = config;
+  sender_config.protector = &outbound;
+  // Packets 4..23 are lost, like a 100 ms Wi-Fi stall.
+  outbound.drop_sequences(4, 20);
+  lanaudio::NetworkReceiver receiver(receiver_config);
+  lanaudio::NetworkSender sender(sender_config);
+  std::string error;
+  CHECK(receiver.start(error));
+  CHECK(sender.start(error));
+  const auto packet_samples = config.format.samples_per_packet();
+  std::vector<float> audio(packet_samples * 28, 0.25F);
+  sender.push_audio(audio);
+  for (int i = 0; i < 100 && receiver.metrics().packets_received.load() < 8;
+       ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  CHECK(receiver.metrics().packets_received.load() == 8);
+  CHECK(receiver.metrics().lost_packets.load() == 20);
+
+  // 4 + 3 faded repeats + 4 packets are playable. Queueing the other 17
+  // missing packets as silence would add 85 ms of latency per stall.
+  const auto playable_frames = (4 + 3 + 4) * config.format.frames_per_packet;
+  // Leave headroom for the drift controller, which speeds playback up by up
+  // to 1% while the queue is above target.
+  std::vector<float> output((playable_frames - 64) * 2, 0.0F);
+  receiver.render_audio(output);
+  CHECK(receiver.metrics().underruns.load() == 0);
+  std::vector<float> beyond(config.format.frames_per_packet * 2, 0.0F);
+  receiver.render_audio(beyond);
+  CHECK(receiver.metrics().underruns.load() == 1);
+  sender.stop();
+  receiver.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -420,6 +476,7 @@ int main() {
   test_media_requires_protection();
   test_localhost_stream();
   test_playout_rebuffers_and_bounds_latency();
+  test_long_gap_does_not_add_latency();
   if (failures == 0) std::cout << "all LanAudio core tests passed\n";
   return failures == 0 ? 0 : 1;
 }
