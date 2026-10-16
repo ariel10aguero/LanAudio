@@ -56,24 +56,32 @@ once so macOS presents the permission prompt.
 
 ## Dropouts
 
-Use wired Ethernet when possible. On Wi-Fi, pick the "Wi-Fi (16 packets)" or
-"Congested Wi-Fi (32 packets)" latency profile on the sender (CLI:
-`--jitter-packets 16`) and a 256-frame device buffer. The sender chooses the
-profile; the receiver adopts it.
+Use Balanced first: it uses 5 ms packets, four jitter packets, and a 128-frame
+device request. Low latency uses only two jitter packets and is intended for
+wired Ethernet or strong Wi-Fi; if it clicks, switch back to Balanced or use
+Reliable. On unstable Wi-Fi pick "Wi-Fi (16 packets)" or "Congested Wi-Fi (32
+packets)". The sender chooses the profile; the receiver adopts it. The CLI
+equivalents are `--latency balanced`, `--latency reliable`, `--latency wifi`,
+and `--latency congested-wifi`. Use wired Ethernet when possible.
 
 Read the receiver statistics (`lanaudio-cli receive --stats-interval-ms 1000`
 prints them every second):
 
 - `lost` rising while `late` stays at 0 means datagrams never arrive. This is
   the Wi-Fi link or the sender, not playback. A 2-Mac Wi-Fi test measured
-  about 15% loss with ping times of 2–219 ms.
+  about 15% loss with ping times of 2–340 ms.
 - `underruns` and `overruns` rising together mean audio arrives in bursts:
   a stall empties the buffer, then a burst overfills it. Use a larger profile.
+- On the sender, `SendFail` counts datagrams macOS refused because the Wi-Fi
+  queue was full.
 
 macOS AWDL (AirDrop, Handoff, Universal Control) periodically moves the Wi-Fi
-radio off-channel and causes 20–100 ms stalls. For a session it can be turned
-off with `sudo ifconfig awdl0 down` on both Macs; it returns after a reboot.
-Do not use Bluetooth output for latency testing.
+radio off-channel. In the test above it took 21–42% of the radio's time while
+the network sat on channel 60 and AWDL on channel 149. For a session it can be
+turned off with `sudo ifconfig awdl0 down` on both Macs; it returns after a
+reboot. Setting AirDrop to Contacts Only or Off also reduces it. Disable Wi-Fi
+power saving and Low Power Mode where appropriate. Do not use Bluetooth output
+for latency testing.
 
 ## No pairing code appears
 

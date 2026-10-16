@@ -61,6 +61,15 @@ rate, the session fails with a clear error instead of resampling.
 See [docs/audio-interfaces.md](docs/audio-interfaces.md) for USB interface and
 channel-routing details.
 
+Choose the desktop **Latency profile** to coordinate packet duration, jitter
+startup, and device buffer requests. Low latency prefers 2.5 ms packets, two
+jitter packets, and 64-frame device periods; Balanced is the default, and
+Reliable adds buffering for less stable networks. Wi-Fi (16 packets) and
+Congested Wi-Fi (32 packets) ride out wireless stalls of 80–160 ms at the cost
+of matching extra latency. Low latency falls back to an
+MTU-safe packet duration when necessary and the negotiated duration is shown in
+Stream format. It remains uncompressed stereo PCM, not a bitrate slider.
+
 ## Command line
 
 The packaged CLI is inside the installed application:
@@ -76,6 +85,11 @@ Receiver:
   --control-port 5005 --media-port 5004 --output 0 \
   --buffer-frames 128
 ```
+
+Use `--latency low`, `--latency balanced`, `--latency reliable`,
+`--latency wifi`, or `--latency congested-wifi` to select a
+coordinated CLI preset. Explicit `--buffer-frames`, `--jitter-packets`, and
+sender-only `--packet-us` values override the preset.
 
 Sender, using the receiver's actual LAN IP:
 

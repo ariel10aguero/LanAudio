@@ -305,7 +305,8 @@ bool derive_media_keys(TlsChannel& channel, NegotiatedSession& session,
 HandshakeStatus negotiate_as_sender(
     TlsChannel& channel, const protocol::DeviceCapabilities& capabilities,
     NegotiatedSession& session, std::string& error,
-    std::uint16_t preferred_jitter_packets) {
+    std::uint16_t preferred_jitter_packets,
+    std::uint32_t preferred_packet_microseconds) {
   if (!capabilities.valid()) {
     error = "the local audio device reported unusable capabilities";
     return HandshakeStatus::protocol_error;
@@ -314,6 +315,10 @@ HandshakeStatus negotiate_as_sender(
   offer.capabilities = capabilities;
   offer.preferred_jitter_packets =
       std::clamp<std::uint16_t>(preferred_jitter_packets, 2, 32);
+  offer.preferred_packet_microseconds =
+      protocol::is_supported_packet_duration(preferred_packet_microseconds)
+          ? preferred_packet_microseconds
+          : protocol::kPreferredPacketMicroseconds;
   if (!send(channel, offer, error)) return HandshakeStatus::closed;
 
   std::vector<std::byte> frame;
@@ -378,7 +383,8 @@ HandshakeStatus negotiate_as_receiver(
 
   protocol::SessionParameters parameters;
   const auto negotiation =
-      protocol::negotiate_session(capabilities, offer.capabilities, parameters);
+      protocol::negotiate_session(capabilities, offer.capabilities, parameters,
+                                  offer.preferred_packet_microseconds);
   if (negotiation != protocol::NegotiationError::none) {
     error = protocol::describe(negotiation);
     (void)reject(channel, protocol::RejectReason::negotiation_failed, error);

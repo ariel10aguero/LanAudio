@@ -176,6 +176,8 @@ class SecureSender final : public SecureEndpoint {
     std::uint16_t control_port{kDefaultControlPort};
     std::uint32_t preferred_sample_rate{protocol::kPreferredSampleRate};
     std::uint16_t preferred_jitter_packets{4};
+    std::uint32_t preferred_packet_microseconds{
+        protocol::kPreferredPacketMicroseconds};
     bool allow_pairing{true};
   };
 

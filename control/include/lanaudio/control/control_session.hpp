@@ -97,7 +97,9 @@ struct NegotiatedSession {
 [[nodiscard]] HandshakeStatus negotiate_as_sender(
     TlsChannel& channel, const protocol::DeviceCapabilities& capabilities,
     NegotiatedSession& session, std::string& error,
-    std::uint16_t preferred_jitter_packets = 4);
+    std::uint16_t preferred_jitter_packets = 4,
+    std::uint32_t preferred_packet_microseconds =
+        protocol::kPreferredPacketMicroseconds);
 
 // Receiver side: intersects capabilities, assigns a random SSRC and session
 // identifier, and answers with the agreed parameters.

@@ -15,7 +15,8 @@ session parameters are rejected before any media starts.
 Message types:
 
 1. hello — protocol version, device name, application version, fingerprint, nonce
-2. capability_offer — supported sample rates and packet durations
+2. capability_offer — supported sample rates and packet durations, preferred
+   jitter packet count, and preferred packet duration
 3. session_accept — negotiated media parameters
 4. session_reject — typed failure
 5. heartbeat
@@ -36,10 +37,12 @@ Supported sample rates: 16 kHz, 32 kHz, 44.1 kHz, 48 kHz, 88.2 kHz, 96 kHz,
 1.25 ms, 2.5 ms, 5 ms, 10 ms, and 20 ms.
 
 The receiver's preferred rate wins when both devices support it; otherwise the
-common rate closest to 48 kHz is chosen. Packet duration is then reduced so
-that L16 payload plus the 16-byte SRTP tag stays at or under 1,200 bytes. If
-no common rate or no MTU-safe duration exists, negotiation fails instead of
-resampling.
+common rate closest to 48 kHz is chosen. The sender's preferred packet duration
+is tried first when it is common and MTU-safe; otherwise the legacy 5 ms
+preference and longest-fitting fallback order is retained. L16 payload plus
+the 16-byte SRTP tag must stay at or under 1,200 bytes. If no common rate or no
+MTU-safe duration exists, negotiation fails instead of resampling. Capability
+offers from older builds without the trailing preference default to 5 ms.
 
 The receiver assigns a random non-zero SSRC and session identifier.
 

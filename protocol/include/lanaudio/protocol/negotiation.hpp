@@ -96,6 +96,8 @@ enum class NegotiationError {
 // so that the payload plus RTP and SRTP overhead stays below the limit.
 [[nodiscard]] NegotiationError negotiate_session(
     const DeviceCapabilities& receiver, const DeviceCapabilities& sender,
-    SessionParameters& result) noexcept;
+    SessionParameters& result,
+    std::uint32_t preferred_packet_microseconds =
+        kPreferredPacketMicroseconds) noexcept;
 
 }  // namespace lanaudio::protocol

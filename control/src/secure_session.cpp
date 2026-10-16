@@ -387,7 +387,8 @@ void SecureSender::run() noexcept {
   NegotiatedSession session;
   const auto negotiated = negotiate_as_sender(
       *channel, local_capabilities(options_.preferred_sample_rate), session,
-      error, options_.preferred_jitter_packets);
+      error, options_.preferred_jitter_packets,
+      options_.preferred_packet_microseconds);
   if (negotiated != HandshakeStatus::ok) {
     if (error.empty()) error = describe(negotiated);
     publish(SessionState::connection_lost, error);

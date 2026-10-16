@@ -50,6 +50,35 @@ protocol::DeviceCapabilities capabilities(
   return value;
 }
 
+void test_negotiation_prefers_requested_packet_duration() {
+  protocol::SessionParameters result;
+  const auto both = capabilities({48'000}, 48'000);
+  CHECK(protocol::negotiate_session(both, both, result, 2'500) ==
+        protocol::NegotiationError::none);
+  CHECK(result.packet_microseconds == 2'500);
+}
+
+void test_negotiation_defaults_to_five_milliseconds() {
+  protocol::SessionParameters result;
+  const auto both = capabilities({48'000}, 48'000);
+  CHECK(protocol::negotiate_session(both, both, result) ==
+        protocol::NegotiationError::none);
+  CHECK(result.packet_microseconds == 5'000);
+}
+
+void test_negotiation_falls_back_when_preference_exceeds_mtu() {
+  protocol::SessionParameters result;
+  const auto both = capabilities(
+      {192'000}, 192'000,
+      {protocol::supported_packet_durations().begin(),
+       protocol::supported_packet_durations().end()});
+  CHECK(protocol::negotiate_session(both, both, result, 2'500) ==
+        protocol::NegotiationError::none);
+  CHECK(result.packet_microseconds == 1'250);
+  CHECK(result.payload_bytes() + protocol::kSrtpOverheadBytes <=
+        protocol::kMaxMediaPayloadBytes);
+}
+
 void test_negotiation_prefers_receiver_rate() {
   protocol::SessionParameters result;
   const auto receiver = capabilities({44'100, 48'000, 96'000}, 96'000);
@@ -140,6 +169,29 @@ void test_control_codec_round_trip() {
   CHECK(decoded.device_name == hello.device_name);
   CHECK(decoded.fingerprint == hello.fingerprint);
   CHECK(decoded.protocol_version == protocol::kControlProtocolVersion);
+}
+
+void test_capability_offer_codec_supports_new_and_legacy_layouts() {
+  protocol::CapabilityOfferMessage offer;
+  offer.capabilities = capabilities({48'000}, 48'000);
+  offer.preferred_jitter_packets = 2;
+  offer.preferred_packet_microseconds = 2'500;
+  std::vector<std::byte> frame;
+  CHECK(protocol::encode(offer, frame));
+
+  protocol::CapabilityOfferMessage decoded;
+  CHECK(protocol::decode(frame, decoded) == protocol::CodecError::none);
+  CHECK(decoded.preferred_jitter_packets == 2);
+  CHECK(decoded.preferred_packet_microseconds == 2'500);
+
+  // Simulate a pre-field capability offer by removing the trailing u32 and
+  // correcting the body length in the frame header.
+  frame.resize(frame.size() - 4);
+  const auto body_size = static_cast<std::uint16_t>(frame.size() - 3);
+  frame[0] = static_cast<std::byte>(body_size >> 8U);
+  frame[1] = static_cast<std::byte>(body_size & 0xffU);
+  CHECK(protocol::decode(frame, decoded) == protocol::CodecError::none);
+  CHECK(decoded.preferred_packet_microseconds == 5'000);
 }
 
 void test_control_codec_rejects_malformed_input() {
@@ -771,11 +823,15 @@ void test_pairing_gate_ignores_stale_clicks() {
 
 int main() {
   test_negotiation_prefers_receiver_rate();
+  test_negotiation_prefers_requested_packet_duration();
+  test_negotiation_defaults_to_five_milliseconds();
+  test_negotiation_falls_back_when_preference_exceeds_mtu();
   test_negotiation_falls_back_to_closest_common_rate();
   test_negotiation_fails_without_common_rate();
   test_negotiation_keeps_packets_under_the_mtu();
   test_negotiation_rejects_unknown_rates();
   test_control_codec_round_trip();
+  test_capability_offer_codec_supports_new_and_legacy_layouts();
   test_control_codec_rejects_malformed_input();
   test_control_codec_validates_session_parameters();
   test_abuse_guard_blocks_floods();
