@@ -177,6 +177,10 @@ class Reader {
                                    : CodecError::malformed_field;
   }
 
+  [[nodiscard]] std::size_t remaining() const noexcept {
+    return body_.size() - std::min(offset_, body_.size());
+  }
+
   [[nodiscard]] CodecError error() const noexcept { return error_; }
 
  private:
@@ -286,6 +290,7 @@ bool encode(const CapabilityOfferMessage& message,
   writer.u32(message.capabilities.preferred_sample_rate);
   writer.u16(message.capabilities.channels);
   writer.u16(message.preferred_jitter_packets);
+  writer.u32(message.preferred_packet_microseconds);
   return writer.finish(frame);
 }
 
@@ -303,9 +308,18 @@ CodecError decode(std::span<const std::byte> frame,
   message.capabilities.preferred_sample_rate = reader.u32();
   message.capabilities.channels = reader.u16();
   message.preferred_jitter_packets = reader.u16();
+  if (reader.remaining() != 0) {
+    message.preferred_packet_microseconds = reader.u32();
+    if (!is_supported_packet_duration(
+            message.preferred_packet_microseconds)) {
+      return CodecError::invalid_value;
+    }
+  } else {
+    message.preferred_packet_microseconds = kPreferredPacketMicroseconds;
+  }
   const auto error = reader.finish();
   if (error != CodecError::none) return error;
-  if (message.preferred_jitter_packets == 0 ||
+  if (message.preferred_jitter_packets < 2 ||
       message.preferred_jitter_packets > 32) {
     return CodecError::invalid_value;
   }

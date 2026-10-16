@@ -56,9 +56,12 @@ once so macOS presents the permission prompt.
 
 ## Dropouts
 
-Use wired Ethernet, select 5 ms packets, raise `--jitter-packets` from 2 to 4 or
-8, and request a 128-frame device buffer. Disable Wi-Fi power saving where
-appropriate. Do not use Bluetooth output for latency testing.
+Use Balanced first: it uses 5 ms packets, four jitter packets, and a 128-frame
+device request. Low latency uses only two jitter packets and is intended for
+wired Ethernet or strong Wi-Fi; if it clicks, switch back to Balanced or use
+Reliable. The CLI equivalents are `--latency balanced` and
+`--latency reliable`. Disable Wi-Fi power saving where appropriate. Do not use
+Bluetooth output for latency testing.
 
 ## Developer build without network access
 

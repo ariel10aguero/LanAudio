@@ -1,4 +1,5 @@
 #include "rtaudio_backend.hpp"
+#include "lanaudio/latency.hpp"
 
 #ifdef LANAUDIO_HAS_SECURITY
 #include "lanaudio/control/discovery.hpp"
@@ -92,6 +93,32 @@ std::optional<std::uint16_t> parse_port(int argc, char** argv,
   return static_cast<std::uint16_t>(*value);
 }
 
+std::optional<lanaudio::LatencyMode> parse_latency_mode(
+    int argc, char** argv, std::string& error) {
+  const auto value = option(argc, argv, "--latency");
+  if (value.empty()) return lanaudio::LatencyMode::balanced;
+  if (value == "low") return lanaudio::LatencyMode::low_latency;
+  if (value == "balanced") return lanaudio::LatencyMode::balanced;
+  if (value == "reliable") return lanaudio::LatencyMode::reliable;
+  error = "--latency must be low, balanced, or reliable";
+  return std::nullopt;
+}
+
+#ifdef LANAUDIO_HAS_SECURITY
+std::optional<std::uint32_t> parse_packet_duration(int argc, char** argv,
+                                                   std::uint32_t fallback,
+                                                   std::string& error) {
+  const auto value = parse_u32_option(argc, argv, "--packet-us", fallback,
+                                      20'000, error);
+  if (!value) return std::nullopt;
+  if (!lanaudio::protocol::is_supported_packet_duration(*value)) {
+    error = "--packet-us must be one of 1000, 1250, 2500, 5000, 10000, or 20000";
+    return std::nullopt;
+  }
+  return value;
+}
+#endif
+
 void install_signals() {
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
@@ -152,10 +179,11 @@ void usage() {
       << "  lanaudio reset-trust\n"
       << "  lanaudio send --host ADDRESS [--control-port 5005]\n"
       << "      [--input ID] [--input-channel 1] [--buffer-frames 128]\n"
+      << "      [--latency low|balanced|reliable] [--packet-us 5000]\n"
       << "      [--preferred-rate 48000] [--jitter-packets 4]\n"
       << "  lanaudio receive [--control-port 5005] [--media-port 5004]\n"
       << "      [--output ID] [--output-channel 1] [--buffer-frames 128]\n"
-      << "      [--preferred-rate 48000]\n"
+      << "      [--latency low|balanced|reliable] [--preferred-rate 48000]\n"
 #else
       << "  lanaudio send / receive  (unavailable: this build has no security "
          "stack)\n"
@@ -358,18 +386,30 @@ int send(int argc, char** argv) {
       parse_u32_option(argc, argv, "--input", 0, 1'000'000, error);
   const auto input_channel =
       parse_u32_option(argc, argv, "--input-channel", 1, 64, error);
+  const auto latency = parse_latency_mode(argc, argv, error);
+  const auto preset = latency ? lanaudio::latency_preset(*latency)
+                              : lanaudio::latency_preset(
+                                    lanaudio::LatencyMode::balanced);
   const auto buffer_frames =
-      parse_u32_option(argc, argv, "--buffer-frames", 128, 4'096, error);
+      parse_u32_option(argc, argv, "--buffer-frames", preset.buffer_frames,
+                       4'096, error);
   const auto preferred_rate =
       parse_u32_option(argc, argv, "--preferred-rate", 48'000, 192'000, error);
-  const auto jitter_packets =
-      parse_u32_option(argc, argv, "--jitter-packets", 4, 32, error);
+  const auto jitter_packets = parse_u32_option(
+      argc, argv, "--jitter-packets", preset.jitter_packets, 32, error);
+  const auto packet_us =
+      parse_packet_duration(argc, argv, preset.packet_microseconds, error);
   if (!control_port || !input || !input_channel || !buffer_frames ||
-      !preferred_rate || !jitter_packets) {
+      !preferred_rate || !jitter_packets || !packet_us || !latency) {
     std::cerr << error << '\n';
     return 2;
   }
-  if (*input_channel == 0) {
+  if (*input_channel == 0 || *jitter_packets < 2) {
+    if (*jitter_packets < 2) {
+      error = "--jitter-packets must be between 2 and 32";
+      std::cerr << error << '\n';
+      return 2;
+    }
     std::cerr << "--input-channel is one-based and must be at least 1\n";
     return 2;
   }
@@ -384,6 +424,7 @@ int send(int argc, char** argv) {
   options.control_port = *control_port;
   options.preferred_sample_rate = *preferred_rate;
   options.preferred_jitter_packets = static_cast<std::uint16_t>(*jitter_packets);
+  options.preferred_packet_microseconds = *packet_us;
   lanaudio::control::SecureSender sender(context, options);
   if (!sender.start(error)) {
     std::cerr << error << '\n';
@@ -431,12 +472,17 @@ int receive(int argc, char** argv) {
       parse_u32_option(argc, argv, "--output", 0, 1'000'000, error);
   const auto output_channel =
       parse_u32_option(argc, argv, "--output-channel", 1, 64, error);
+  const auto latency = parse_latency_mode(argc, argv, error);
+  const auto preset = latency ? lanaudio::latency_preset(*latency)
+                              : lanaudio::latency_preset(
+                                    lanaudio::LatencyMode::balanced);
   const auto buffer_frames =
-      parse_u32_option(argc, argv, "--buffer-frames", 128, 4'096, error);
+      parse_u32_option(argc, argv, "--buffer-frames", preset.buffer_frames,
+                       4'096, error);
   const auto preferred_rate =
       parse_u32_option(argc, argv, "--preferred-rate", 48'000, 192'000, error);
   if (!control_port || !media_port || !output || !output_channel ||
-      !buffer_frames || !preferred_rate) {
+      !buffer_frames || !preferred_rate || !latency) {
     std::cerr << error << '\n';
     return 2;
   }

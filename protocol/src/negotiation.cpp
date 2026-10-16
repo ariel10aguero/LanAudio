@@ -112,7 +112,7 @@ bool SessionParameters::valid() const noexcept {
   }
   if (payload_type < 96 || payload_type > 127) return false;
   if (ssrc == 0 || session_id == 0 || media_port == 0) return false;
-  if (jitter_packets == 0 || jitter_packets > 32) return false;
+  if (jitter_packets < 2 || jitter_packets > 32) return false;
   return payload_bytes() + kSrtpOverheadBytes <= kMaxMediaPayloadBytes;
 }
 
@@ -138,7 +138,9 @@ std::string describe(NegotiationError error) {
 
 NegotiationError negotiate_session(const DeviceCapabilities& receiver,
                                    const DeviceCapabilities& sender,
-                                   SessionParameters& result) noexcept {
+                                   SessionParameters& result,
+                                   std::uint32_t preferred_packet_microseconds)
+    noexcept {
   if (!receiver.valid() || !sender.valid()) {
     return NegotiationError::invalid_capabilities;
   }
@@ -176,9 +178,26 @@ NegotiationError negotiate_session(const DeviceCapabilities& receiver,
   std::vector<std::uint32_t> ordered(durations);
   std::sort(ordered.begin(), ordered.end(), std::greater<std::uint32_t>());
   const auto preferred = std::find(ordered.begin(), ordered.end(),
-                                   kPreferredPacketMicroseconds);
+                                   preferred_packet_microseconds);
+  bool preferred_fits = false;
   if (preferred != ordered.end()) {
+    const auto preferred_frames = frames_for_duration(rate, *preferred);
+    const auto preferred_payload =
+        payload_bytes_for(preferred_frames, kRequiredChannels);
+    preferred_fits = preferred_frames != 0 &&
+                     preferred_payload + kSrtpOverheadBytes <=
+                         kMaxMediaPayloadBytes;
+  }
+  if (preferred_fits) {
     std::rotate(ordered.begin(), preferred, preferred + 1);
+  } else {
+    // An unavailable or oversized preference retains the established 5 ms
+    // preference before falling through to the longest MTU-safe duration.
+    const auto fallback = std::find(ordered.begin(), ordered.end(),
+                                    kPreferredPacketMicroseconds);
+    if (fallback != ordered.end()) {
+      std::rotate(ordered.begin(), fallback, fallback + 1);
+    }
   }
 
   for (const auto duration : ordered) {

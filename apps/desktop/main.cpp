@@ -1,4 +1,5 @@
 #include "rtaudio_backend.hpp"
+#include "lanaudio/latency.hpp"
 
 #ifdef LANAUDIO_HAS_SECURITY
 #include "lanaudio/control/discovery.hpp"
@@ -260,8 +261,11 @@ class MainWindow final : public QMainWindow {
     configure_combo(&profile_);
     configure_combo(&preferred_rate_);
     configure_combo(&device_buffer_);
-    profile_.addItems({"Ultra-low (2 packets)", "Balanced (4 packets)",
+    profile_.addItems({"Low latency (2 packets)", "Balanced (4 packets)",
                        "Reliable (8 packets)"});
+    profile_.setToolTip(
+        "Low latency is best on wired or strong Wi-Fi; use Balanced if you "
+        "hear clicks.");
     profile_.setCurrentIndex(1);
     preferred_rate_.addItem("Automatic (prefer 48 kHz)", 48'000);
     preferred_rate_.addItem("44.1 kHz", 44'100);
@@ -376,6 +380,17 @@ class MainWindow final : public QMainWindow {
     });
     connect(&mode_, qOverload<int>(&QComboBox::currentIndexChanged), this,
             [this] { update_mode(); });
+    connect(&profile_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+              const auto mode = index == 0
+                                    ? lanaudio::LatencyMode::low_latency
+                                    : (index == 2 ? lanaudio::LatencyMode::reliable
+                                                  : lanaudio::LatencyMode::balanced);
+              const auto preset = lanaudio::latency_preset(mode);
+              const auto buffer_index = device_buffer_.findData(
+                  static_cast<unsigned>(preset.buffer_frames));
+              if (buffer_index >= 0) device_buffer_.setCurrentIndex(buffer_index);
+            });
     connect(&input_devices_, qOverload<int>(&QComboBox::currentIndexChanged),
             this, [this] { update_input_device(); });
     connect(&output_devices_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -756,14 +771,15 @@ class MainWindow final : public QMainWindow {
       return false;
     }
     media_live_.store(true, std::memory_order_release);
+    const auto snapshot = sender_ ? sender_->snapshot() : receiver_->snapshot();
     format_.setText(QString("%1 kHz stereo PCM • %2 ms packets • %3")
                         .arg(format.sample_rate / 1'000.0, 0, 'f', 1)
                         .arg(format.frames_per_packet * 1'000.0 /
                                  format.sample_rate,
                              0, 'f', 1)
-                        .arg(QString::fromStdString(
-                            sender_ ? sender_->snapshot().media_profile
-                                    : receiver_->snapshot().media_profile)));
+                        .arg(QString::fromStdString(snapshot.media_profile) +
+                             QString(" • %1 jitter packets")
+                                 .arg(snapshot.parameters.jitter_packets)));
     return true;
   }
 
@@ -857,6 +873,8 @@ class MainWindow final : public QMainWindow {
       options.preferred_jitter_packets = static_cast<std::uint16_t>(
           profile_.currentIndex() == 0 ? 2
                                        : (profile_.currentIndex() == 1 ? 4 : 8));
+      options.preferred_packet_microseconds =
+          profile_.currentIndex() == 0 ? 2'500 : 5'000;
       sender_ = std::make_unique<lanaudio::control::SecureSender>(context_,
                                                                   options);
       if (!sender_->start(error)) {

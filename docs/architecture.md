@@ -58,17 +58,26 @@ callbacks only push or render samples. Unencrypted RTP exists only behind
 
 ## Latency budget
 
-At the default settings, software buffering starts with:
+Balanced is the default profile. Its nominal software budget is:
 
-- input callback request: 64 frames (1.33 ms at 48 kHz);
+- input callback request: 128 frames (2.67 ms at 48 kHz);
 - packetization: up to 240 frames (5 ms);
-- receiver startup: two packets (10 ms);
-- output callback request: 64 frames (1.33 ms).
+- receiver startup: four packets (20 ms);
+- output callback request: 128 frames (2.67 ms).
 
 These values do not include converter, hardware, driver, scheduling, network,
 or DAC latency. Actual periods can differ from requests. Consequently the
 analog 10–20 ms objective requires measured hardware tuning and cannot be
 inferred from this nominal sum.
+
+The Low latency profile coordinates a 2.5 ms packet preference, two jitter
+packets, and 64-frame device requests. At 48 kHz this is a nominal 1.33 ms
+callback + 2.5 ms packet + 5 ms jitter startup budget on each software side.
+Reliable uses 5 ms packets, eight jitter packets, and 256-frame requests.
+These are presets, not a quality or bitrate control: media remains stereo L16
+PCM protected by SRTP. If the preferred packet would exceed the encrypted MTU,
+negotiation keeps the existing safe-duration fallback policy and the UI shows
+the actual negotiated duration.
 
 ## Next architectural increments
 
