@@ -61,7 +61,8 @@ tools/macos/verify_dmg.sh LanAudio-0.1.0-macOS-arm64.dmg arm64
 
 Use an Intel build host and `x86_64` for the Intel package. Cross-compiling
 with an arm64-only Qt installation is intentionally rejected. Release CI uses
-native `macos-26` (arm64) and `macos-26-intel` (x86_64) runners. The Intel
+native `macos-15` (arm64) and `macos-15-intel` (x86_64) runners with an Xcode 16
+SDK, because Qt 6.8.3 links AGL.framework, which the macOS 26 SDK removed. The Intel
 runner is scheduled for retirement by GitHub after the macOS 15/26 Intel image
 lifecycle, so the runner strategy must be revisited before that service ends.
 

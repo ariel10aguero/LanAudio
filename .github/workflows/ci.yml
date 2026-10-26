@@ -56,15 +56,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Qt 6.8.3 links AGL.framework, which the macOS 26 SDK (Xcode 26)
+        # removed, so release builds use macOS 15 runners with an Xcode 16 SDK.
         include:
           - arch: arm64
-            runner: macos-26
+            runner: macos-15
           - arch: x86_64
-            runner: macos-26-intel
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode 16 (SDK still provides AGL for Qt 6.8.3)
+        run: |
+          xcode=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
+          if [[ -z "${xcode}" ]]; then
+            echo "No Xcode 16 installation found on this runner" >&2
+            ls -d /Applications/Xcode*.app >&2 || true
+            exit 1
+          fi
+          sudo xcode-select -s "${xcode}/Contents/Developer"
+          xcodebuild -version
+          xcrun --show-sdk-version
 
       - name: Install pinned Qt
         uses: jurplel/install-qt-action@v4

@@ -179,7 +179,8 @@ target_compile_features(lanaudio_core PUBLIC cxx_std_20)
 target_link_libraries(lanaudio_core PUBLIC lanaudio_protocol)
 lanaudio_apply_warnings(lanaudio_core)
 
-if(MSVC)
+# Winsock is needed by every Windows toolchain (MSVC and MinGW alike).
+if(WIN32)
   target_link_libraries(lanaudio_core PUBLIC ws2_32)
 endif()
 
