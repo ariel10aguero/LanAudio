@@ -8,10 +8,9 @@ LanAudio captures a stereo input pair on one machine and plays it on another
 PCM (L16) over RTP/UDP. Every stream is encrypted, and the two
 devices must be paired before any audio flows.
 
-<!-- Screenshot placeholder: add an image or GIF of the desktop app at
-     docs/images/lanaudio-gui.png and replace this comment with:
-     ![LanAudio desktop app](docs/images/lanaudio-gui.png) -->
-> **Screenshot / GIF:** _coming soon._
+| Sender | Receiver |
+| --- | --- |
+| ![LanAudio desktop app in Send mode](docs/images/lanaudio-send.png) | ![LanAudio desktop app in Receive mode](docs/images/lanaudio-receive.png) |
 
 > **Project status:** pairing, encrypted media, automatic format negotiation,
 > and the latency profiles are implemented and covered by unit tests. Analog
