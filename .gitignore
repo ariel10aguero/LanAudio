@@ -1,8 +1,64 @@
+# CMake build trees (any out-of-source directory named build*)
 /build*/
-/_CPack_Packages/
-/.cache/
-*.user
-*.DS_Store
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+_deps/
 compile_commands.json
-LanAudio-*.tar.gz
+/.cache/
+
+# CPack output and release packages
+/_CPack_Packages/
 LanAudio-*.dmg
+LanAudio-*.tar.gz
+LanAudio-*.zip
+*.sbom.json
+sbom.json
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.dSYM/
+*.app/
+
+# Logs and scratch output
+*.log
+
+# Secrets, keys, and certificates (never commit these)
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.mobileprovision
+.env
+.env.*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.user
+*.swp
+*~
+
+# Local tool configuration
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

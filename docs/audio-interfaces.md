@@ -34,7 +34,7 @@ Then select the reported interface ID and a one-based first channel:
 
 ```bash
 /Applications/LanAudio.app/Contents/MacOS/lanaudio-cli send \
-  --host 192.168.0.199 --control-port 5005 \
+  --host 192.168.1.50 --control-port 5005 \
   --input 145 --input-channel 1 \
   --buffer-frames 128
 ```
