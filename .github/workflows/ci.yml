@@ -40,6 +40,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
       - name: Reject plaintext distribution combination
+        # Bash syntax; Windows runners default to PowerShell otherwise.
+        shell: bash
         run: |
           if cmake -S . -B build-plaintext-dist -G Ninja \
             -DLANAUDIO_ALLOW_PLAINTEXT=ON \
