@@ -283,8 +283,7 @@ More detail: [docs/architecture.md](docs/architecture.md),
 
 I owned the system design: the functional and non-functional requirements,
 the object-oriented design, and the overall architecture. AI coding agents
-(Claude Code, OpenCode, and ORCA) wrote the implementation against that
-design.
+(OpenCode and ORCA) wrote the implementation against that design.
 
 ## License
 
