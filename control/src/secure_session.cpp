@@ -444,24 +444,36 @@ void SecureSender::run() noexcept {
 
   // Heartbeats keep the control channel authenticated. Losing it tears the
   // media down rather than letting unauthenticated audio continue.
+  // A heartbeat goes out once per interval; the reads in between only wait
+  // for the echo or a goodbye. Sending the next beat as soon as the echo
+  // arrived turned the loop into an RTT-bound ping-pong (thousands per second
+  // on a fast link) that also contended for media_mutex_ with push_audio.
   std::uint64_t counter = 0;
   auto last_seen = std::chrono::steady_clock::now();
+  auto next_beat = last_seen;
   while (!should_stop()) {
-    protocol::HeartbeatMessage beat;
-    beat.counter = ++counter;
-    beat.monotonic_micros = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    std::vector<std::byte> frame;
-    if (!protocol::encode(beat, frame) ||
-        !channel->write_frame(frame, error)) {
-      break;
+    if (std::chrono::steady_clock::now() >= next_beat) {
+      protocol::HeartbeatMessage beat;
+      beat.counter = ++counter;
+      beat.monotonic_micros = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
+      std::vector<std::byte> frame;
+      if (!protocol::encode(beat, frame) ||
+          !channel->write_frame(frame, error)) {
+        break;
+      }
+      next_beat = std::chrono::steady_clock::now() + kHeartbeatInterval;
     }
 
+    const auto until_next_beat = std::max(
+        std::chrono::milliseconds(1),
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            next_beat - std::chrono::steady_clock::now()));
     std::vector<std::byte> response;
     bool timed_out = false;
-    if (channel->read_frame(response, kHeartbeatInterval, timed_out, error)) {
+    if (channel->read_frame(response, until_next_beat, timed_out, error)) {
       protocol::ControlMessageType type{};
       if (protocol::frame_type(response, type) == protocol::CodecError::none &&
           type == protocol::ControlMessageType::goodbye) {
