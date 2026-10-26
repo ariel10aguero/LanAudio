@@ -572,15 +572,33 @@ void test_secure_session_pairs_negotiates_and_streams() {
   CHECK(endpoints.receiver->trust().contains(
       endpoints.sender->identity().fingerprint()));
 
+  // push_audio drops a block when it cannot take the media lock without
+  // waiting, exactly as a real audio callback would, so keep feeding audio
+  // like a device does instead of relying on a single block getting through.
   std::vector<float> audio(parameters.frames_per_packet * 2 * 6, 0.25F);
-  sender.push_audio(audio);
   const bool delivered = wait_for(
       [&] {
         const auto* metrics = receiver.metrics();
-        return metrics != nullptr && metrics->packets_received.load() >= 6;
+        if (metrics != nullptr && metrics->packets_received.load() >= 6) {
+          return true;
+        }
+        sender.push_audio(audio);
+        return false;
       },
       std::chrono::seconds(5));
   CHECK(delivered);
+  if (!delivered) {
+    if (const auto* sent = sender.metrics()) {
+      std::cerr << "sender: sent=" << sent->packets_sent.load()
+                << " send_fail=" << sent->send_failures.load()
+                << " overruns=" << sent->overruns.load() << '\n';
+    }
+    if (const auto* received = receiver.metrics()) {
+      std::cerr << "receiver: received=" << received->packets_received.load()
+                << " rate_limited=" << received->rate_limited_packets.load()
+                << " malformed=" << received->malformed_packets.load() << '\n';
+    }
+  }
 
   const auto* metrics = receiver.metrics();
   if (metrics != nullptr) {
